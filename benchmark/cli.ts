@@ -14,7 +14,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CURATED_TRIP_IDS, type CuratedTripId } from "@/cities/chicago-trips";
 import { createJevController, type JevController } from "@/controllers/jev";
-import { createJevServiceGate } from "@/jev/scheduler";
+import { sessionJevServiceGate } from "@/jev/service-budget";
 import {
   createHttpJevClient,
   createMockJevClient,
@@ -691,7 +691,13 @@ async function main(argv: readonly string[]): Promise<number> {
                 // keeps it inside the upstream budget instead of asking 24 times
                 // a minute at a service that grants about 5. A deterministic
                 // run (mock, replay) wires none, so its results are unchanged.
-                serviceGate: live ? createJevServiceGate() : null,
+                //
+                // The SESSION's gate, shared by every run in this invocation:
+                // the allowance belongs to the credential, so a per-run gate
+                // would let run 2 ask as if run 1 had spent nothing — the 429s
+                // this exists to prevent. Each run still reports its own
+                // requests (jev/scheduler.ts `serviceStatusSince`).
+                serviceGate: live ? sessionJevServiceGate() : null,
               });
           jevControllers.push(controller);
           currentJev = controller;

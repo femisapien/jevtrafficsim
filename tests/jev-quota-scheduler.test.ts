@@ -18,7 +18,10 @@
  *   G  max hold still invalidates a run whose service genuinely disappears
  *   H  the accelerated tail asks for nothing, whatever the wall clock says
  *   I  a recorded run replays to the same policy instants (determinism)
- *   J  no gate, refusal or outage can reach an Adaptive decision
+ *   J  no gate, refusal or outage can reach an Adaptive decision — and a STARTUP
+ *      the gate does not allow reports the run as unable without asking, while a
+ *      run whose refresh windows are all declined stays 100% Jev on its first
+ *      policy
  *
  * plus the arithmetic that ties the scheduler's wall-clock cadence to the
  * simulated TTL / max-hold constants, so they cannot drift apart again.
@@ -684,24 +687,33 @@ describe("J. no gate, refusal or outage can reach an Adaptive decision", () => {
     });
   });
 
-  it("keeps a gated run 100% Jev even when the gate refuses every window", () => {
+  it("keeps a gated run 100% Jev on its first policy when every window is refused", () => {
     adaptiveCalls.constructions = 0;
     adaptiveCalls.decisions = 0;
     const clock = fakeClock();
-    // A gate that never allows a refresh, and a service that answers once.
+    // A gate that allows the STARTUP request and then refuses every window: a
+    // declined refresh is a SCHEDULING fact, not a failure, and a run whose
+    // refreshes are all declined is still 100% Jev — governed by the one policy
+    // it did accept. (The startup request is the only one it may make.)
+    let issuedCount = 0;
     const refusing: JevServiceGate = {
-      eligibility: () => ({ ok: false, reason: "budget", waitMs: 1_000 }),
+      eligibility: () =>
+        issuedCount === 0
+          ? { ok: true, reason: null, waitMs: 0 }
+          : { ok: false, reason: "budget", waitMs: 1_000 },
       waitDetail: () => "the service budget for this window is spent",
-      issued: () => {},
+      issued: () => {
+        issuedCount += 1;
+      },
       succeeded: () => {},
       failed: () => {},
       waitUntilEligible: async () => false,
       status: () => ({
-        issued: 0,
-        answered: 0,
+        issued: issuedCount,
+        answered: issuedCount,
         failedByCause: {},
         refusals: { budget: 1 },
-        issuedInWindow: 0,
+        issuedInWindow: issuedCount,
         allowedInWindow: JEV_SERVICE_MAX_PER_WINDOW,
         minSpacingMs: JEV_SERVICE_MIN_SPACING_MS,
         failuresInARow: 0,
@@ -749,6 +761,104 @@ describe("J. no gate, refusal or outage can reach an Adaptive decision", () => {
     expect(status.adaptiveTicks).toBe(0);
     expect(adaptiveCalls.constructions).toBe(0);
     expect(adaptiveCalls.decisions).toBe(0);
+  });
+
+  it("refuses to start a run whose first request the gate does not allow", () => {
+    adaptiveCalls.constructions = 0;
+    adaptiveCalls.decisions = 0;
+    const clock = fakeClock();
+    // The gate is closed for the STARTUP too. The run must NOT ask anyway: a
+    // startup that punched through a spent window would spend it twice and
+    // rate-limit the run after it. It reports itself unable, sends no request,
+    // and nothing takes Jev's place.
+    const closed: JevServiceGate = {
+      eligibility: () => ({ ok: false, reason: "budget", waitMs: 1_000 }),
+      waitDetail: () => "the service budget for this window is spent",
+      issued: () => {},
+      succeeded: () => {},
+      failed: () => {},
+      waitUntilEligible: async () => false,
+      status: () => ({
+        issued: 0,
+        answered: 0,
+        failedByCause: {},
+        refusals: { budget: 1 },
+        issuedInWindow: JEV_SERVICE_MAX_PER_WINDOW,
+        allowedInWindow: JEV_SERVICE_MAX_PER_WINDOW,
+        minSpacingMs: JEV_SERVICE_MIN_SPACING_MS,
+        failuresInARow: 0,
+        nextEligibleInMs: 1_000,
+        successSpacingP50Ms: null,
+        successSpacingMaxMs: null,
+        retryAfterMs: null,
+      }),
+    };
+    let requests = 0;
+    const controller = createJevController({
+      client: {
+        id: "mock",
+        requestPolicy: () => {
+          requests += 1;
+          return policy(1.1);
+        },
+      },
+      scenarioFingerprint: "closed-gate",
+      serviceGate: closed,
+      now: clock.now,
+      refreshMs: 100,
+      ttlMs: 1_000,
+      maxHoldMs: 60_000,
+    });
+    const { engine, partition } = crossroads();
+    return Promise.resolve(controller.start(observation(engine, partition))).then((outcome) => {
+      expect(outcome.state).toBe("unable");
+      if (outcome.state !== "unable") {
+        throw new Error("a startup the gate does not allow must report the run as unable");
+      }
+      expect(outcome.reason).toBe("service-budget");
+      // No request was made, and no simulated time passed.
+      expect(outcome.attempts).toBe(0);
+      expect(requests).toBe(0);
+      expect(engine.traffic.timeMs).toBe(0);
+      const status = controller.status();
+      expect(status.refreshes).toBe(0);
+      expect(status.fallbackMs).toBe(0);
+      expect(status.adaptiveTicks).toBe(0);
+      expect(status.source).toBe("waiting");
+      expect(adaptiveCalls.constructions).toBe(0);
+      expect(adaptiveCalls.decisions).toBe(0);
+    });
+  });
+});
+
+/* --------------- the wait, re-decided, inside one wall-clock bound ---------- */
+
+describe("a wait re-decides after every refusal, inside one bound", () => {
+  it("waits a retry-after and then the backoff behind it, within the bound", async () => {
+    const { clock, gate } = gatedClock();
+    const start = clock.value;
+    // One transient failure (a backoff of one cadence) and a retry-after that
+    // expires BEFORE it: a single sleep would report "not eligible" at the
+    // moment the retry-after passed, while the backoff was still in force.
+    gate.issued(start);
+    gate.failed({ cause: "upstream-error", retryAfterMs: null, atEpochMs: start });
+    gate.failed({ cause: "rate-limited", retryAfterMs: 5_000, atEpochMs: start });
+
+    expect(await gate.waitUntilEligible({ maxWaitMs: 60_000 })).toBe(true);
+    // The wait covered BOTH bounds: the pause, and the cadence behind it.
+    expect(clock.value).toBeGreaterThanOrEqual(start + JEV_SERVICE_MIN_SPACING_MS);
+    expect(gate.eligibility().ok).toBe(true);
+  });
+
+  it("refuses a wait longer than the bound without waiting at all", async () => {
+    const { clock, gate } = gatedClock();
+    const start = clock.value;
+    gate.issued(start);
+    gate.failed({ cause: "rate-limited", retryAfterMs: 30_000, atEpochMs: start });
+
+    expect(await gate.waitUntilEligible({ maxWaitMs: 10_000 })).toBe(false);
+    expect(clock.value).toBe(start); // nothing was slept
+    expect(gate.eligibility().reason).toBe("retry-after");
   });
 });
 

@@ -174,6 +174,8 @@ export function refreshDetailForCause(cause: JevCause): string {
       return "no policy client was configured for this run";
     case "first-policy":
       return "no policy existed yet";
+    case "service-budget":
+      return "the run's share of the service window did not allow a request in time";
     case "expired":
       return "the policy in force passed its maximum age";
     case "held":

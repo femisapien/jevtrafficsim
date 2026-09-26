@@ -88,6 +88,18 @@
  * policy in force simply keeps governing, which is what the pure-Jev contract
  * says happens when a refresh produces nothing. Simulation mechanics are
  * untouched: only the WALL-CLOCK eligibility of a request is decided here.
+ *
+ * ## Its SCOPE, which is the whole point of jev/service-budget.ts
+ *
+ * One gate guards one upstream allowance, so there is exactly ONE gate per
+ * application session (`sessionJevServiceGate`), not one per controller. The
+ * allowance belongs to the credential the request is made with, and in this
+ * deployment that credential lives on the server: a run that builds a fresh
+ * gate — a reset, a new scenario, a rebuilt controller — would ask as if the
+ * window were empty while the upstream still counts the previous run's
+ * requests. See the module doc of jev/service-budget.ts for the measured scope
+ * of the allowance, what is shared across runs, what is deliberately not, and
+ * what a browser-local gate can and cannot protect.
  */
 import { percentile } from "@/sim/metrics";
 import type { JevClientFailure } from "./client";
@@ -203,9 +215,15 @@ export interface JevServiceGate {
     readonly atEpochMs?: number;
   }): void;
   /**
-   * Wait until a request would be eligible, up to `maxWaitMs`. Returns false
-   * when the wait would be longer than that — a caller that cannot wait must
-   * report the truth rather than start a run late.
+   * Wait until a request would be eligible, up to a TOTAL of `maxWaitMs`.
+   *
+   * The wait is re-decided as the state moves, because a refusal can hand over
+   * to another one: the trailing window emptying can reveal that the cadence
+   * has not yet passed, and a retry-after expiring can reveal a backoff behind
+   * it. A single sleep would report "not eligible" while a request would in
+   * fact have become possible inside the bound. Returns false when the bound
+   * cannot be met — a caller that cannot wait must report the truth rather than
+   * start a run late.
    */
   waitUntilEligible(options?: { readonly maxWaitMs?: number }): Promise<boolean>;
   status(): JevServiceStatus;
@@ -247,6 +265,55 @@ export function boundedRetryAfterMs(value: number | null | undefined): number | 
 
 /** How many successful spacings the status keeps for its percentile. */
 const SPACING_SAMPLES = 64;
+
+/**
+ * ONE RUN's own view of a SHARED gate's counters.
+ *
+ * The gate is session-scoped (jev/service-budget.ts), so its counters describe
+ * the whole session: how many requests every run in it issued, what came back,
+ * and how often the schedule refused. A run's own account of itself must
+ * describe ITS requests — `service.issued` in a result has to mean the requests
+ * that run made — so the runtime subtracts the snapshot it took when it was
+ * built (`baseline`) from the live status.
+ *
+ * The CAPACITY fields are passed through unchanged and deliberately: how much
+ * of the trailing window is spent, how long until the next eligible instant,
+ * what pause is in force and how far apart successes landed are facts about the
+ * SERVICE right now, not about one run. A per-run delta of "requests in the
+ * window" would be meaningless — the window is shared, which is the entire
+ * point of sharing the gate.
+ *
+ * `baseline` null means "no gate": the status is returned as it stands.
+ */
+export function serviceStatusSince(
+  current: JevServiceStatus,
+  baseline: JevServiceStatus | null,
+): JevServiceStatus {
+  if (baseline === null) {
+    return current;
+  }
+  const failedByCause: Record<string, number> = {};
+  for (const [cause, count] of Object.entries(current.failedByCause)) {
+    const before = baseline.failedByCause[cause as JevClientFailure] ?? 0;
+    if (count > before) {
+      failedByCause[cause] = count - before;
+    }
+  }
+  const refusals: Record<string, number> = {};
+  for (const [reason, count] of Object.entries(current.refusals)) {
+    const before = baseline.refusals[reason as JevServiceRefusal] ?? 0;
+    if (count > before) {
+      refusals[reason] = count - before;
+    }
+  }
+  return {
+    ...current,
+    issued: Math.max(0, current.issued - baseline.issued),
+    answered: Math.max(0, current.answered - baseline.answered),
+    failedByCause,
+    refusals,
+  };
+}
 
 export function createJevServiceGate(options: JevServiceGateOptions = {}): JevServiceGate {
   const windowMs = options.windowMs ?? JEV_SERVICE_BUDGET.WINDOW_MS;
@@ -403,14 +470,23 @@ export function createJevServiceGate(options: JevServiceGateOptions = {}): JevSe
 
     async waitUntilEligible(waitOptions = {}) {
       const maxWaitMs = waitOptions.maxWaitMs ?? windowMs;
-      const decision = decide(now());
-      if (decision.ok) {
-        return true;
+      const deadline = now() + maxWaitMs;
+      // Re-decide after every wait: one refusal can hand over to another (the
+      // window emptying reveals a cadence, a retry-after expiring reveals a
+      // backoff), and the bound is on the TOTAL wait, not on one step of it.
+      // Each wait clears at least the constraint that produced it and there are
+      // four of those, so the loop is bounded even if a clock never moves; the
+      // decision after the last step is the honest answer either way.
+      for (let step = 0; step < JEV_SERVICE_REFUSALS.length; step += 1) {
+        const decision = decide(now());
+        if (decision.ok) {
+          return true;
+        }
+        if (decision.waitMs > deadline - now()) {
+          return false;
+        }
+        await sleep(decision.waitMs + JEV_SERVICE_BUDGET.TIMER_SLACK_MS);
       }
-      if (decision.waitMs > maxWaitMs) {
-        return false;
-      }
-      await sleep(decision.waitMs + JEV_SERVICE_BUDGET.TIMER_SLACK_MS);
       return decide(now()).ok;
     },
 

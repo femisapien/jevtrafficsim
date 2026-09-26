@@ -809,6 +809,8 @@ export function causeReason(cause: JevCause | null | undefined): string | null {
       return "no model was configured";
     case "first-policy":
       return "the run was still waiting for its first policy";
+    case "service-budget":
+      return "the service window did not allow a request in time";
     case "expired":
       return "the held policy passed its maximum age";
     case "held":

@@ -161,7 +161,17 @@ allowance: two thirds of a full run's refreshes came back 429, and the run was
 invalidated when no fresh policy arrived before the last one's maximum hold. An explicit
 `retry-after` is honoured to the millisecond (the relay forwards it to the browser as a
 bounded number), a transient 5xx backs off instead of retrying in a burst, and a
-successful answer clears that backoff.
+successful answer clears that backoff. The gate is the SESSION's, not the controller's
+(`jev/service-budget.ts`): the allowance belongs to the credential the relay holds, so a
+rebuilt controller — a reset, a new scenario, the next run — inherits the window the
+previous run spent and waits for it, instead of asking as if nothing had been spent. The
+startup gate goes through the same schedule: a run whose first request the service cannot
+allow inside its bound reports itself unable and sends nothing. Scope, stated honestly:
+this keeps ONE session's runs inside the allowance, and it is what the measured 429s came
+from; two tabs each hold their own session gate and can still jointly exceed a
+credential-wide allowance, so a guarantee across tabs/users would need shared state at the
+relay (a durable token bucket) or a Vercel Firewall rule sized to the upstream allowance —
+instance-local serverless memory is not a global coordinator and is not presented as one.
 
 A refused or failed request never substitutes anything: the last accepted policy keeps
 governing — reported as *held* once it is past its freshness window, bounded by a maximum

@@ -58,6 +58,14 @@
  * Everything else about the harness is identical between clients, so a mock
  * iteration and a live confirmation are the same measurement of the same run.
  *
+ * LIVE ROUTES IN ONE INVOCATION SHARE ONE SESSION GATE (jev/service-budget.ts).
+ * They are sequential runs of one session — the same relationship two runs of
+ * the app have — and the upstream allowance belongs to the credential, not to a
+ * controller, so a per-route gate would ask as if the previous route had spent
+ * nothing. Sharing it is what makes route 2 wait for the window route 1 really
+ * used, and each route still reports its OWN requests: the runtime subtracts the
+ * counters the shared gate already held when the route was built.
+ *
  *   # iterate: all six trips, no network
  *   pnpm tsx scripts/jev-fallback-harness.ts
  *
@@ -68,6 +76,11 @@
  *   # confirm the DEPLOYED relay path end to end (no credential needed)
  *   pnpm tsx scripts/jev-fallback-harness.ts --client relay --base-url https://jevtrafficsim.vercel.app \
  *     --trips soldier-field-to-navy-pier
+ *
+ *   # two sequential live runs in ONE session: the second inherits the first's
+ *   # spent window and waits for the service budget rather than asking anyway
+ *   pnpm tsx --env-file=.env.local scripts/jev-fallback-harness.ts \
+ *     --client gateway --trips soldier-field-to-navy-pier,united-center-to-willis-tower
  *
  *   # negative control: a stand-in that cannot answer at all must FAIL the gate
  *   pnpm tsx scripts/jev-fallback-harness.ts --mock-fail timeout
@@ -90,7 +103,8 @@ import {
 import { jevProvenance, provenanceLine, type JevProvenance } from "@/jev/provenance";
 import { JEV_SCHEMA_VERSION } from "@/jev/schema";
 import { JEV_REFRESH_REASONS, type JevRefreshEvent, type JevRefreshReason, type JevRefreshTelemetry } from "@/jev/telemetry";
-import { createJevServiceGate, type JevServiceStatus } from "@/jev/scheduler";
+import { sessionJevServiceGate } from "@/jev/service-budget";
+import type { JevServiceStatus } from "@/jev/scheduler";
 import type { DriverStrategy } from "@/sim/driver";
 import type { TrafficLevel } from "@/sim/types";
 import type { ScenarioRun } from "@/worker/challenge-compare";
@@ -378,6 +392,14 @@ interface RouteReport {
   readonly failures: readonly JevRefreshEvent[];
   readonly latencyP50Ms: number;
   readonly latencyMaxMs: number;
+  /**
+   * The wall-clock instants this route's run started and ended. They make the
+   * report self-contained about TIMING: a run whose window was already spent
+   * must show its first request AFTER the instant it started, which is the
+   * difference between waiting for the shared budget and asking anyway.
+   */
+  readonly startedAtEpochMs: number;
+  readonly endedAtEpochMs: number;
 }
 
 /** What a route report needs from a run's outcome; a ChallengeResult satisfies it. */
@@ -404,9 +426,17 @@ function summarizeSpacing(values: readonly number[]): { p50: number; max: number
   return { p50: sorted[Math.floor(sorted.length / 2)], max: sorted[sorted.length - 1] };
 }
 
-/** The p50/max answer latency of the windows the record still holds. */
+/**
+ * The p50/max answer latency of the windows that actually ASKED.
+ *
+ * A window the schedule declined (or that found a request in flight) made no
+ * request at all, so it has no answer latency; its recorded 0 is the absence of
+ * an answer, not a fast one. Counting those zeros would drag the median towards
+ * zero and describe a service that was never asked.
+ */
 function summarizeLatency(events: readonly JevRefreshEvent[]): { p50: number; max: number } {
   const values = events
+    .filter((event) => event.generation !== null)
     .map((event) => event.latencyMs)
     .filter((value): value is number => value !== null)
     .sort((a, b) => a - b);
@@ -429,6 +459,7 @@ function reportFor(
     };
   },
   horizonMs: number,
+  wall: { readonly startedAtEpochMs: number; readonly endedAtEpochMs: number },
 ): RouteReport {
   const meta = controller.meta();
   const provenance = jevProvenance(meta);
@@ -471,6 +502,8 @@ function reportFor(
     failures: telemetry.recent.filter((event) => event.outcome !== "live"),
     latencyP50Ms: latency.p50,
     latencyMaxMs: latency.max,
+    startedAtEpochMs: wall.startedAtEpochMs,
+    endedAtEpochMs: wall.endedAtEpochMs,
   };
 }
 
@@ -548,6 +581,9 @@ async function main(): Promise<void> {
   const paceRatio = options.paceRatio ?? (isLive ? 8 : 0);
   const client = buildClient(options);
   const model = loadBenchmarkModel();
+  // ONE session gate for every route this invocation runs (see the module doc):
+  // sequential live runs share one upstream allowance, so they share one gate.
+  const sessionGate = isLive ? sessionJevServiceGate() : null;
 
   console.log(
     `\nJev pure-execution harness · client=${options.client}${options.client === "mock" && options.mockLatencyMs > 0 ? ` (+${options.mockLatencyMs}ms)` : ""}` +
@@ -580,8 +616,11 @@ async function main(): Promise<void> {
               client,
               scenarioFingerprint: context.fingerprint,
               // Live clients spend a real allowance; the stand-in spends none
-              // and stays deterministic, so only the live paths are gated.
-              serviceGate: isLive ? createJevServiceGate() : null,
+              // and stays deterministic, so only the live paths are gated. The
+              // gate is the SESSION's (shared by every route in this invocation,
+              // exactly as it is shared by every run of one app session), not a
+              // fresh one per route: the allowance belongs to the credential.
+              serviceGate: sessionGate,
             });
             return controller;
           },
@@ -602,7 +641,10 @@ async function main(): Promise<void> {
       if (controller === null) {
         throw error;
       }
-      const report = reportFor(tripId, controller, emptyResult(), options.horizonMs);
+      const report = reportFor(tripId, controller, emptyResult(), options.horizonMs, {
+        startedAtEpochMs: startedAt,
+        endedAtEpochMs: Date.now(),
+      });
       reports.push(report);
       console.log(
         `\n[run FAIL] ${tripId} · ${error instanceof Error ? error.message : String(error)}`,
@@ -615,7 +657,10 @@ async function main(): Promise<void> {
     if (controller === null) {
       throw new Error("the seam never asked for a jev controller");
     }
-    const report = reportFor(tripId, controller, result, options.horizonMs);
+    const report = reportFor(tripId, controller, result, options.horizonMs, {
+      startedAtEpochMs: startedAt,
+      endedAtEpochMs: Date.now(),
+    });
     reports.push(report);
     const verdict = routeVerdict(report);
     const wallMs = Date.now() - startedAt;
@@ -694,6 +739,32 @@ async function main(): Promise<void> {
           `${secs(report.successSpacingSimMs.p50)}/${secs(report.successSpacingSimMs.max)}`.padStart(20),
         ].join(" "),
       );
+    }
+    // What the SESSION spent, not what one route spent: the counters above are
+    // per-route (this run's own requests), and this line is the shared window
+    // they all drew from — the fact a per-controller gate used to hide.
+    if (sessionGate !== null) {
+      const session = sessionGate.status();
+      console.log(
+        `  session budget (ONE gate for every route above): ${session.issued} requests issued, ` +
+          `${session.issuedInWindow}/${session.allowedInWindow} in the trailing window` +
+          `${session.retryAfterMs === null ? "" : `, a ${secs(session.retryAfterMs)} pause in force`}`,
+      );
+      // WHEN each route's first request landed relative to its own start: a
+      // route that inherited a spent window shows a positive delay here, which
+      // is the difference between waiting for the shared budget and asking
+      // anyway. The instant is the window's own record (wall-clock, for
+      // correlating a run with logs).
+      for (const report of reports) {
+        const firstRequest = report.telemetry.recent.find((event) => event.generation !== null);
+        if (firstRequest === undefined) {
+          continue;
+        }
+        console.log(
+          `  ${report.tripId.padEnd(32)} first request ${secs(firstRequest.atEpochMs - report.startedAtEpochMs)}` +
+            ` after this route started (route ran ${secs(report.endedAtEpochMs - report.startedAtEpochMs)})`,
+        );
+      }
     }
   }
 

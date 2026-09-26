@@ -17,7 +17,7 @@ import { createFixedController } from "@/controllers/fixed";
 import { createJevController } from "@/controllers/jev";
 import type { TrafficController } from "@/controllers/contract";
 import { createRelayJevClient, JEV_RELAY_TIMEOUT_MS } from "@/jev/client";
-import { createJevServiceGate } from "@/jev/scheduler";
+import { sessionJevServiceGate } from "@/jev/service-budget";
 import { CHICAGO_SCALE_LABELS } from "@/cities/chicago";
 import { METRO_SCALE_INDEX } from "@/cities/chicago-trips";
 import { materializeChallengeTrip } from "@/worker/ego-spawn";
@@ -160,10 +160,18 @@ function makeController(choice: ControllerChoice, identity: string) {
     // thirds of a production run's refreshes into 429s and invalidated the run
     // when no fresh policy arrived in time. The gate spends 4 of those 5
     // requests, evenly, and honours a `retry-after` our relay forwards.
+    //
+    // It is the SESSION's gate (jev/service-budget.ts), NOT a new one per
+    // controller: the allowance belongs to the credential our relay holds, so a
+    // rebuilt controller — a reset, a new scenario, the next run — must inherit
+    // the window the previous run spent rather than start from an empty one.
+    // One gate per run is what produced "run A spends the window, run B asks
+    // anyway, 429s return"; one gate per session is what makes the second run
+    // wait for the budget the first one really used.
     return createJevController({
       client: createRelayJevClient({ timeoutMs: JEV_RELAY_TIMEOUT_MS }),
       scenarioFingerprint: identity,
-      serviceGate: createJevServiceGate(),
+      serviceGate: sessionJevServiceGate(),
     });
   }
   return choice === "adaptive" ? createAdaptiveController() : createFixedController();
