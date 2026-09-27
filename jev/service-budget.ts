@@ -19,9 +19,10 @@
  *   - the browser carries no credential at all (`createRelayJevClient` in
  *     jev/client.ts sends no Authorization header) and posts to our own route,
  *     which is the only place the service credential lives (app/api/jev/policy/
- *     route.ts: Vercel's request-scoped OIDC token for the AI Gateway, or
- *     JEV_TOKEN). Every tab, every run and every user of the deployment asks
- *     with that same credential;
+ *     route.ts: the explicitly configured AI Gateway API key —
+ *     AI_GATEWAY_API_KEY, then JEV_TOKEN — or the deployment's request-scoped
+ *     OIDC token when no explicit key exists). Every tab, every run and every
+ *     user of the deployment asks with that same credential;
  *   - the allowance is reported against that credential, per model, by the
  *     gateway itself: every 429 carries `x-ratelimit-limit-requests: 5`,
  *     `x-ratelimit-remaining-requests: 0` and `x-ratelimit-reset-requests`

@@ -11,7 +11,8 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getVercelOidcTokenSync } from "@vercel/oidc";
 import { createAdaptiveController } from "@/controllers/adaptive";
 import { buildJevPolicyRequest } from "@/jev/request";
 import { createEngine, runEngine } from "@/sim/engine";
@@ -25,10 +26,26 @@ import { JEV_LIMITS, JEV_SCHEMA_VERSION, validateJevPolicyRequest } from "@/jev/
 import { DEFAULT_SIGNAL_TIMING } from "@/sim/config";
 import type { JevPolicyRequest } from "@/jev/schema";
 
+/**
+ * The deployment's OIDC context, stubbed: the real helper reads a per-request
+ * header the platform sets (or VERCEL_OIDC_TOKEN in the environment), which no
+ * test has. The route must consult it ONLY when no explicit AI Gateway key is
+ * configured — that is the contract these tests pin — and stubbing it here also
+ * keeps this suite independent of any ambient VERCEL_OIDC_TOKEN.
+ */
+vi.mock("@vercel/oidc", () => ({
+  getVercelOidcTokenSync: vi.fn(),
+}));
+
 const ENDPOINT = "https://jev.invalid/policy";
 const TOKEN = "token-that-must-never-appear-anywhere";
+/** The standard-name credential a correctly configured deployment holds. */
+const STANDARD_KEY = "standard-gateway-key-that-must-never-appear-anywhere";
+/** The deployment's own request-scoped OIDC token, as the platform would mint it. */
+const OIDC_TOKEN = "deployment-oidc-token-that-must-never-appear-anywhere";
 
 const originalEnv = {
+  AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
   JEV_ENDPOINT: process.env.JEV_ENDPOINT,
   JEV_TOKEN: process.env.JEV_TOKEN,
   JEV_TIMEOUT_MS: process.env.JEV_TIMEOUT_MS,
@@ -40,6 +57,7 @@ function configure(): void {
   process.env.JEV_ENDPOINT = ENDPOINT;
   process.env.JEV_TOKEN = TOKEN;
   delete process.env.JEV_MODEL;
+  delete process.env.AI_GATEWAY_API_KEY;
 }
 
 function request(overrides: Partial<JevPolicyRequest> = {}): JevPolicyRequest {
@@ -124,17 +142,24 @@ function post(body: unknown, init: RequestInit = {}): Promise<Response> {
 
 beforeEach(() => {
   configure();
+  // Every test starts from "the platform minted an OIDC token for this
+  // request", so a test that expects the fallback lane is explicit about it,
+  // and a test that expects the explicit key proves OIDC was never needed.
+  const oidc = vi.mocked(getVercelOidcTokenSync);
+  oidc.mockReset();
+  oidc.mockReturnValue(OIDC_TOKEN);
 });
 
 afterEach(() => {
-  process.env.JEV_ENDPOINT = originalEnv.JEV_ENDPOINT;
-  process.env.JEV_TOKEN = originalEnv.JEV_TOKEN;
-  process.env.JEV_TIMEOUT_MS = originalEnv.JEV_TIMEOUT_MS;
-  if (originalEnv.JEV_MODEL === undefined) {
-    delete process.env.JEV_MODEL;
-  } else {
-    process.env.JEV_MODEL = originalEnv.JEV_MODEL;
-  }
+  const restore = (key: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  };
+  restore("AI_GATEWAY_API_KEY", originalEnv.AI_GATEWAY_API_KEY);
+  restore("JEV_ENDPOINT", originalEnv.JEV_ENDPOINT);
+  restore("JEV_TOKEN", originalEnv.JEV_TOKEN);
+  restore("JEV_TIMEOUT_MS", originalEnv.JEV_TIMEOUT_MS);
+  restore("JEV_MODEL", originalEnv.JEV_MODEL);
   globalThis.fetch = originalFetch;
 });
 
@@ -350,25 +375,62 @@ describe("jev server boundary", () => {
     expect(gatewayEnv?.endpoint).toBeNull();
   });
 
-  it("prefers request-scoped OIDC for Gateway without changing direct-service credentials", () => {
+  it("uses the configured AI Gateway key first, and OIDC only as the fallback", () => {
     process.env.JEV_MODEL = "typesafe-ai/jev";
-    expect(readJevEnvironment("fresh-oidc-token")?.token).toBe("fresh-oidc-token");
+    process.env.JEV_TOKEN = TOKEN;
 
+    // 1. The standard name wins over everything, including the legacy JEV_TOKEN
+    //    and the deployment's own OIDC token: exactly ONE credential is used.
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    const standard = readJevEnvironment(OIDC_TOKEN);
+    expect(standard?.token).toBe(STANDARD_KEY);
+    expect(standard?.authMode).toBe("api-key");
+    expect(standard?.token).not.toBe(TOKEN);
+    expect(standard?.token).not.toBe(OIDC_TOKEN);
+
+    // 2. Without the standard name, the legacy JEV_TOKEN is the explicit key —
+    //    it never loses to OIDC, and it is never mixed with the standard name.
+    delete process.env.AI_GATEWAY_API_KEY;
+    const legacy = readJevEnvironment(OIDC_TOKEN);
+    expect(legacy?.token).toBe(TOKEN);
+    expect(legacy?.authMode).toBe("api-key");
+
+    // 3. OIDC is the fallback, and only the fallback.
     delete process.env.JEV_TOKEN;
-    expect(readJevEnvironment("fresh-oidc-token")?.token).toBe("fresh-oidc-token");
-    expect(readJevEnvironment()).toBeNull();
+    const oidc = readJevEnvironment(OIDC_TOKEN);
+    expect(oidc?.token).toBe(OIDC_TOKEN);
+    expect(oidc?.authMode).toBe("oidc");
 
-    configure();
-    expect(readJevEnvironment("fresh-oidc-token")?.token).toBe(TOKEN);
+    // 4. With neither, there is no environment at all — the route says so (503)
+    //    rather than inventing a credential.
+    expect(readJevEnvironment()).toBeNull();
   });
 
-  it("logs one bounded reason and nothing else", async () => {
+  it("keeps the direct-service lane on JEV_TOKEN, never the gateway key", () => {
+    delete process.env.JEV_MODEL;
+    process.env.JEV_ENDPOINT = ENDPOINT;
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    delete process.env.JEV_TOKEN;
+    // An AI Gateway key is not a credential for a schema-speaking service, so
+    // it is never sent to one: without JEV_TOKEN there is no environment.
+    expect(readJevEnvironment()).toBeNull();
+
+    process.env.JEV_TOKEN = TOKEN;
+    const environment = readJevEnvironment();
+    expect(environment?.token).toBe(TOKEN);
+    expect(environment?.authMode).toBe("api-key");
+    expect(environment?.gateway).toBeNull();
+  });
+
+  it("logs one bounded reason, its lane, and nothing else", async () => {
     const source = readFileSync(path.join(process.cwd(), "app", "api", "jev", "policy", "route.ts"), "utf8");
     expect(source).not.toMatch(/process\.stdout|process\.stderr/);
-    // The only log call takes failureReason(error) — never a body, never a URL.
+    // The only log call takes failureReason(error) — never a body, never a URL —
+    // plus the credential LANE as a name (a closed two-value vocabulary).
     const logs = [...source.matchAll(/console\.error\(([^;]*)\)/g)].map((match) => match[1]);
     expect(logs).toHaveLength(1);
     expect(logs[0]).toContain("failureReason(error)");
+    expect(logs[0]).toContain("environment.authMode");
 
     // And the reason itself is bounded whatever the upstream did.
     expect(failureReason(new Error("jev gateway responded 401"))).toBe("jev gateway responded 401");
@@ -396,8 +458,10 @@ describe("jev server boundary", () => {
     }
     expect(logged).toHaveLength(1);
     // The configured backend here is the schema service (no JEV_MODEL), so the
-    // reason names that status — the point is that it is a status and nothing else.
+    // reason names that status — the point is that it is a status and nothing
+    // else — and the lane rides with it as a name.
     expect(logged[0]).toContain("jev service responded 500");
+    expect(logged[0]).toContain("api-key");
     expect(logged[0]).not.toContain(TOKEN);
     expect(logged[0]).not.toContain("revoked");
   });
@@ -406,6 +470,103 @@ describe("jev server boundary", () => {
     // The route has no business owning mechanics constants; this is a guard
     // that the adapter layer never grows its own copy of them.
     expect(DEFAULT_SIGNAL_TIMING.minGreenMs).toBeGreaterThan(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The production auth contract: the LANE is reported, the credential never is */
+/* -------------------------------------------------------------------------- */
+
+describe("gateway credential lane (production auth contract)", () => {
+  /** Answers every question the request asked, so the policy comes back valid. */
+  function stubGatewayFetch(seen: string[]): void {
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      seen.push(new Headers(init.headers).get("authorization") ?? "");
+      const body = JSON.parse(String(init.body)) as { questions: Record<string, unknown> };
+      const answers = Object.fromEntries(
+        Object.keys(body.questions).map((id) => [
+          id,
+          {
+            type: "choice",
+            choice: id === "hint" ? "hold-longer" : id === "pressure" ? "steady" : "high",
+            confidence: 0.6,
+          },
+        ]),
+      );
+      return new Response(JSON.stringify({ answers }), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it("sends the configured key, reports the lane, and never the credential", async () => {
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.JEV_TOKEN = TOKEN;
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    const seen: string[] = [];
+    stubGatewayFetch(seen);
+
+    const response = await post(request());
+    expect(response.status).toBe(200);
+    // Exactly one credential went upstream, and it is the explicit one.
+    expect(seen).toEqual([`Bearer ${STANDARD_KEY}`]);
+    // The lane is a NAME; the credential appears nowhere, in no form — not in
+    // the body and not in any header value.
+    expect(response.headers.get("x-jev-auth")).toBe("api-key");
+    const text = await response.text();
+    expect(text).not.toContain(STANDARD_KEY);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("Bearer");
+    for (const [, value] of response.headers) {
+      expect(value).not.toContain(STANDARD_KEY);
+    }
+  });
+
+  it("does not consult the deployment's OIDC token while an explicit key exists", async () => {
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.JEV_TOKEN = TOKEN;
+    delete process.env.AI_GATEWAY_API_KEY;
+    const seen: string[] = [];
+    stubGatewayFetch(seen);
+
+    const response = await post(request());
+    expect(response.status).toBe(200);
+    // The regression this pins: production used to prefer the request-scoped
+    // OIDC token over the configured key, so the key was never even reached.
+    expect(vi.mocked(getVercelOidcTokenSync)).not.toHaveBeenCalled();
+    expect(seen).toEqual([`Bearer ${TOKEN}`]);
+    expect(response.headers.get("x-jev-auth")).toBe("api-key");
+  });
+
+  it("falls back to OIDC — and says so — when no explicit key is configured", async () => {
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    delete process.env.JEV_TOKEN;
+    delete process.env.AI_GATEWAY_API_KEY;
+    const seen: string[] = [];
+    stubGatewayFetch(seen);
+
+    const response = await post(request());
+    expect(response.status).toBe(200);
+    expect(vi.mocked(getVercelOidcTokenSync)).toHaveBeenCalledTimes(1);
+    expect(seen).toEqual([`Bearer ${OIDC_TOKEN}`]);
+    expect(response.headers.get("x-jev-auth")).toBe("oidc");
+  });
+
+  it("reports the lane on a refused request too, so production can see which credential asked", async () => {
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.JEV_TOKEN = TOKEN;
+    delete process.env.AI_GATEWAY_API_KEY;
+    // The production symptom: the gateway refuses the credential it was sent.
+    globalThis.fetch = (async () =>
+      new Response(`upstream said: ${TOKEN} is not allowed`, {
+        status: 403,
+      })) as unknown as typeof fetch;
+
+    const response = await post(request());
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-jev-auth")).toBe("api-key");
+    expect(response.headers.get("x-jev-reason")).toBe("rejected");
+    const text = await response.text();
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("not allowed");
   });
 });
 

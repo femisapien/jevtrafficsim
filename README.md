@@ -132,13 +132,19 @@ pnpm dev                        # http://localhost:3000
 With no Jev configuration there is no Jev run: the startup gate reports the reason in
 plain words, and nothing is simulated in its place.
 
-On Vercel, set `JEV_MODEL=typesafe-ai/jev`; the relay uses its request-scoped
-Vercel OIDC token for AI Gateway. For local runs outside Vercel, provide a valid
-AI Gateway key in `.env.local` (never committed):
+On Vercel, set `JEV_MODEL=typesafe-ai/jev`. The relay authenticates with the
+explicitly configured AI Gateway API key whenever one exists — `AI_GATEWAY_API_KEY`
+first, then `JEV_TOKEN` for deployments configured before the standard name — and
+falls back to the deployment's request-scoped Vercel OIDC token ONLY when no
+explicit key is set. Exactly one credential is ever sent, and every relay
+response reports which lane was used as `x-jev-auth: api-key | oidc` (a name,
+never any part of the credential), so a gateway 403 can be diagnosed without
+guessing. For local runs outside Vercel, provide a valid AI Gateway key in
+`.env.local` (never committed):
 
 ```
 JEV_MODEL=typesafe-ai/jev
-JEV_TOKEN=<your local AI Gateway key>
+AI_GATEWAY_API_KEY=<your local AI Gateway key>
 # optional
 JEV_MIN_CONFIDENCE=0.25
 JEV_TIMEOUT_MS=12000   # the free evaluation tier is variable; a tight

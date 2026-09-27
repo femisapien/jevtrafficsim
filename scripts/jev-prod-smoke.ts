@@ -60,6 +60,11 @@ async function main(): Promise<void> {
   const payload = (await res.json().catch(() => null)) as unknown;
 
   console.log(`relay: HTTP ${res.status} in ${elapsed} ms`);
+  // WHICH credential lane the deployment used: a name, never a value. It is the
+  // one fact that makes a gateway 403 diagnosable; a deployment that predates
+  // the diagnostic simply reports nothing here.
+  const lane = res.headers.get("x-jev-auth");
+  console.log(`relay: auth lane ${lane ?? "not reported (deployment predates x-jev-auth)"}`);
   checkRelayAnswer(res.status, payload, request);
   console.log("relay: schema-valid bounded policy; no credential-shaped value");
 

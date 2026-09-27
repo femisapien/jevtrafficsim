@@ -6,8 +6,12 @@
  * keeps the secret out of the client bundle, out of the worker payload, out of
  * browser state and out of logs:
  *
- *   - the credential comes from Vercel's request-scoped OIDC token for AI
- *     Gateway, or JEV_TOKEN for a separately hosted/local service;
+ *   - the credential is the explicitly configured AI Gateway API key whenever
+ *     one exists — `AI_GATEWAY_API_KEY` first, then `JEV_TOKEN` (kept for
+ *     backward compatibility) — and the deployment's request-scoped Vercel OIDC
+ *     token for AI Gateway ONLY as the fallback when no explicit key is set.
+ *     Exactly one credential is ever used, and which LANE it was travels as a
+ *     name (`authMode`, `x-jev-auth`), never as a value;
  *   - the token travels in an Authorization header, never in a body, a URL or a
  *     message we log;
  *   - failure responses carry a status and a short message, never the service's
@@ -21,9 +25,12 @@
  *
  * A failure upstream is reported to the caller as one short sentence and to the
  * operator as ONE bounded reason (an HTTP status, a timeout, or "unexpected
- * failure"). Nothing else is ever logged: an upstream body can echo credentials
- * back, and a free-form error message can carry anything, so neither is allowed
- * near the log. `failureReason` is the single place that decides what a log line
+ * failure") plus the credential LANE it happened on — a name from a closed
+ * two-value vocabulary ("api-key" | "oidc"), because "the gateway answered 403"
+ * is undiagnosable without knowing which credential asked. Nothing else is ever
+ * logged: an upstream body can echo credentials back, and a free-form error
+ * message can carry anything, so neither is allowed near the log.
+ * `failureReason` is the single place that decides what a log line
  * may say, which is what makes the rule testable.
  *
  * The same bounded class rides out to the caller in `x-jev-reason` (and, on a
@@ -54,6 +61,7 @@ import { unstable_checkRateLimit as checkRateLimit } from "@vercel/firewall";
 import { getVercelOidcTokenSync } from "@vercel/oidc";
 import {
   createHttpJevClient,
+  JEV_AUTH_HEADER,
   JEV_CLAMPED_HEADER,
   JEV_DEFAULT_TIMEOUT_MS,
   JEV_DROPPED_HEADER,
@@ -191,8 +199,20 @@ export function firstParty(request: Request): boolean {
   return true;
 }
 
+/**
+ * WHICH credential lane a resolved environment uses, as a name.
+ *
+ * This is the only thing about the credential that is ever reported anywhere —
+ * a closed two-value vocabulary, never a token, a prefix, a length or a hash.
+ * It exists because a gateway refusal ("responded 403") is undiagnosable
+ * without knowing which credential asked.
+ */
+export type JevAuthMode = "api-key" | "oidc";
+
 export interface JevEnvironment {
   readonly token: string;
+  /** Which lane `token` came from: an explicit key, or the deployment's OIDC. */
+  readonly authMode: JevAuthMode;
   readonly timeoutMs: number;
   /** Set when this deployment talks to the Vercel AI Gateway. */
   readonly gateway: {
@@ -293,18 +313,47 @@ export function failureClass(error: unknown): JevClientFailure {
  * wait, retries into the same closed window and collects a second 429 — which is
  * how a burst of retries turns one rate limit into four. No upstream string
  * crosses this line: the header is an integer this codebase parsed and bounded.
+ *
+ * `authMode` rides along as `x-jev-auth` whenever the lane is known: the
+ * credential LANE as a name ("api-key" | "oidc"), never any part of the
+ * credential itself.
  */
 function refusal(
   status: number,
   error: string,
   failure: JevClientFailure,
   retryAfterMs: number | null = null,
+  authMode: JevAuthMode | null = null,
 ): Response {
   const headers: Record<string, string> = { [JEV_REASON_HEADER]: failure };
+  if (authMode !== null) {
+    headers[JEV_AUTH_HEADER] = authMode;
+  }
   if (retryAfterMs !== null) {
     headers[JEV_RETRY_AFTER_HEADER] = String(retryAfterMs);
   }
   return Response.json({ error }, { status, headers });
+}
+
+/**
+ * The explicitly configured AI Gateway credential, when there is one.
+ *
+ * The precedence is fixed and deliberate: the standard `AI_GATEWAY_API_KEY`
+ * first, then `JEV_TOKEN`, which deployments configured before the standard
+ * name existed still hold. Exactly ONE credential is selected here; the two are
+ * never combined, and neither is ever combined with the OIDC fallback.
+ *
+ * This is the credential the GATEWAY lane uses. A schema-speaking service
+ * behind JEV_ENDPOINT keeps its own credential (JEV_TOKEN) — an AI Gateway key
+ * is not a credential for that service, so it is never sent to one.
+ */
+export function configuredGatewayApiKey(): string | undefined {
+  const standard = process.env.AI_GATEWAY_API_KEY?.trim();
+  if (standard !== undefined && standard !== "") {
+    return standard;
+  }
+  const legacy = process.env.JEV_TOKEN?.trim();
+  return legacy === undefined || legacy === "" ? undefined : legacy;
 }
 
 export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | null {
@@ -320,10 +369,23 @@ export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | 
 
   const model = process.env.JEV_MODEL?.trim();
   if (model) {
-    const token = gatewayOidcToken?.trim() || configuredToken;
-    if (!token) return null;
+    // The credential precedence, in one place and in this order:
+    //   1. the explicitly configured AI Gateway API key (AI_GATEWAY_API_KEY,
+    //      then JEV_TOKEN) — when one exists, the deployment's own OIDC token is
+    //      not even consulted;
+    //   2. the deployment's request-scoped OIDC token, ONLY as the fallback;
+    //   3. nothing — the route answers 503 rather than guessing at a credential.
+    // Which lane was taken is reported as `authMode`, so production can prove
+    // it without any part of the credential being seen.
+    const apiKey = configuredGatewayApiKey();
+    const oidcToken = gatewayOidcToken?.trim();
+    const token = apiKey ?? oidcToken;
+    if (token === undefined || token === "") {
+      return null;
+    }
     return {
       token,
+      authMode: apiKey === undefined ? "oidc" : "api-key",
       timeoutMs: overrideMs ?? JEV_GATEWAY_TIMEOUT_MS,
       gateway: {
         endpoint: process.env.JEV_GATEWAY_URL?.trim() || JEV_GATEWAY_ENDPOINT,
@@ -339,7 +401,13 @@ export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | 
   if (!endpoint) {
     return null;
   }
-  return { token: configuredToken, timeoutMs: overrideMs ?? JEV_DEFAULT_TIMEOUT_MS, gateway: null, endpoint };
+  return {
+    token: configuredToken,
+    authMode: "api-key",
+    timeoutMs: overrideMs ?? JEV_DEFAULT_TIMEOUT_MS,
+    gateway: null,
+    endpoint,
+  };
 }
 
 /** The one place a client is built from configuration. */
@@ -361,15 +429,19 @@ export function jevClientFromEnvironment(environment: JevEnvironment): JevClient
 }
 
 export async function POST(request: Request): Promise<Response> {
-  // In Functions the platform rotates this token on each request and exposes it
-  // through request context, not a stable process.env value. The official helper
-  // reads that context; a missing token leaves the explicit local key usable.
+  // The deployment's OIDC token is the FALLBACK credential, so it is read only
+  // when no explicit AI Gateway API key is configured: with a key present, the
+  // request never depends on OIDC at all. (In Functions the platform rotates
+  // this token on each request and exposes it through request context, not a
+  // stable process.env value. The official helper reads that context.)
   let gatewayOidcToken: string | undefined;
-  if (process.env.JEV_MODEL?.trim()) {
+  if (process.env.JEV_MODEL?.trim() && configuredGatewayApiKey() === undefined) {
     try {
       gatewayOidcToken = getVercelOidcTokenSync();
     } catch {
-      // Local/non-Vercel runs may intentionally use JEV_TOKEN instead.
+      // No OIDC context here (a local run, or a project without it). With no
+      // explicit key either, the route reports itself unconfigured — it never
+      // invents a credential.
     }
   }
   const environment = readJevEnvironment(gatewayOidcToken);
@@ -377,46 +449,56 @@ export async function POST(request: Request): Promise<Response> {
     return refusal(503, "jev is not configured", "not-configured");
   }
 
+  // Every refusal past this point knows which credential lane it is about, so
+  // each carries the lane as a name. The 503 above has no lane to report:
+  // nothing is configured.
+  const deny = (
+    status: number,
+    error: string,
+    failure: JevClientFailure,
+    retryAfterMs: number | null = null,
+  ): Response => refusal(status, error, failure, retryAfterMs, environment.authMode);
+
   if (!firstParty(request)) {
-    return refusal(403, "cross-origin requests are not allowed", "rejected");
+    return deny(403, "cross-origin requests are not allowed", "rejected");
   }
 
   // Identity comes from the platform (see caller.ts), never from the caller's
   // own forwarding headers, and is never echoed back in a response.
   const key = callerIdentity(request);
   if (await platformRateLimited(request, key)) {
-    return refusal(429, "too many policy requests", "rate-limited");
+    return deny(429, "too many policy requests", "rate-limited");
   }
   if (!allowRequest(key, Date.now())) {
-    return refusal(429, "too many policy requests", "rate-limited");
+    return deny(429, "too many policy requests", "rate-limited");
   }
 
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
-    return refusal(413, "request body is too large", "rejected");
+    return deny(413, "request body is too large", "rejected");
   }
 
   let text: string;
   try {
     text = await request.text();
   } catch {
-    return refusal(400, "request body could not be read", "rejected");
+    return deny(400, "request body could not be read", "rejected");
   }
   // The declared length is a claim; this is the actual size.
   if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
-    return refusal(413, "request body is too large", "rejected");
+    return deny(413, "request body is too large", "rejected");
   }
 
   let body: unknown;
   try {
     body = JSON.parse(text) as unknown;
   } catch {
-    return refusal(400, "request body must be JSON", "rejected");
+    return deny(400, "request body must be JSON", "rejected");
   }
 
   const validated = validateJevPolicyRequest(body);
   if (!validated.ok) {
-    return refusal(400, validated.error, "rejected");
+    return deny(400, validated.error, "rejected");
   }
 
   const client = jevClientFromEnvironment(environment);
@@ -424,7 +506,7 @@ export async function POST(request: Request): Promise<Response> {
     const raw = await client.requestPolicy(validated.value);
     const parsed = parseJevPolicy(raw, jevPolicyContext(validated.value));
     if (!parsed.ok) {
-      return refusal(502, parsed.error, "malformed");
+      return deny(502, parsed.error, "malformed");
     }
     // What this answer cost, in counts only: a policy that had to be clamped is
     // applied and reported as imperfect rather than hidden.
@@ -435,12 +517,16 @@ export async function POST(request: Request): Promise<Response> {
         headers: {
           [JEV_CLAMPED_HEADER]: String(parsed.value.clamped.length),
           [JEV_DROPPED_HEADER]: String(notes?.dropped ?? 0),
+          // The lane, as a name — so production can prove which credential
+          // asked without any part of it being visible.
+          [JEV_AUTH_HEADER]: environment.authMode,
         },
       },
     );
   } catch (error) {
-    // Bounded by construction: a status or the word "timeout", never a body.
-    console.error("[jev-relay] policy request failed:", failureReason(error));
-    return refusal(502, "jev service request failed", failureClass(error), clientRetryAfterMs(error));
+    // Bounded by construction: a status or the word "timeout", never a body —
+    // plus the credential LANE the failure happened on (a name, never a value).
+    console.error("[jev-relay] policy request failed:", failureReason(error), environment.authMode);
+    return deny(502, "jev service request failed", failureClass(error), clientRetryAfterMs(error));
   }
 }

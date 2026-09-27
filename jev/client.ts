@@ -45,6 +45,16 @@ export const JEV_DROPPED_HEADER = "x-jev-dropped";
  * seconds, so the unit cannot be misread.
  */
 export const JEV_RETRY_AFTER_HEADER = "x-jev-retry-after-ms";
+/**
+ * WHICH credential lane the relay used to reach the model gateway: `api-key`
+ * when an explicitly configured key was sent (AI_GATEWAY_API_KEY, or JEV_TOKEN
+ * as its backward-compatible fallback), `oidc` when the deployment's own
+ * request-scoped Vercel token was. A NAME from a closed two-value vocabulary —
+ * no token, prefix, length or hash ever rides with it — which is what lets an
+ * operator (or the production smoke) prove which lane a request used, including
+ * one the gateway refused.
+ */
+export const JEV_AUTH_HEADER = "x-jev-auth";
 
 /**
  * How a policy request failed, in the smallest vocabulary that can be reported
