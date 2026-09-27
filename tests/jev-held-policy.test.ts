@@ -478,6 +478,7 @@ describe("the provenance label names the state that actually happened", () => {
     for (const cause of [
       "unconfigured",
       "first-policy",
+      "service-budget",
       "expired",
       "held",
       "superseded",

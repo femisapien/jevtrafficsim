@@ -33,10 +33,44 @@
  *
  * Every validity decision is made in simulation time. A policy is accepted at a
  * simulated instant, expires at a simulated instant, and is held for a simulated
- * minimum. Wall-clock time governs exactly one thing: how long an HTTP request
- * may take before it is abandoned. That separation is what makes a run
- * replayable — nothing about policy application depends on how fast the machine
- * or the network was.
+ * minimum. Wall-clock time governs exactly two things, and neither of them can
+ * change what the simulation does: how long an HTTP request may take before it
+ * is abandoned, and WHEN a request may be made at all (`serviceGate`, see
+ * jev/scheduler.ts — the upstream allowance is a wall-clock budget and has to be
+ * spent as one). That separation is what makes a run replayable — nothing about
+ * policy application depends on how fast the machine or the network was.
+ *
+ * ## Asking at the rate the service actually grants
+ *
+ * The cadence this runtime used to ask at was a SIMULATED constant (REFRESH_MS),
+ * and at the shipped playback that worked out to ~24 requests/minute against a
+ * service whose measured allowance is 5 requests per ~60 s window: the live
+ * probe answered 10 of 30 requests, and the run was invalidated when the last
+ * accepted policy outlived its hold. `serviceGate` is the fix, and it lives
+ * outside this file because it is a wall-clock question: the runtime consults it
+ * at each due window, and a window it declines is recorded as SKIPPED (a
+ * scheduling fact) rather than as a failure. Everything else is unchanged — a
+ * declined window makes no request, substitutes nothing, and leaves the policy
+ * in force governing, which is exactly what the contract says a refresh that
+ * produces nothing does.
+ *
+ * The gate is ONE object per application session (jev/service-budget.ts), not
+ * one per controller: the allowance belongs to the credential, so a rebuilt
+ * controller — a reset, a new scenario, the next run — must inherit the window
+ * the previous one spent instead of starting from an empty one. `service` in
+ * this runtime's status is this run's own requests, taken as the difference from
+ * the counters the shared gate already held when the run was built.
+ *
+ * ## Startup is not an exception to the schedule
+ *
+ * The first policy is obtained through the SAME gate as every refresh, and the
+ * startup path does not get to ask when the schedule says no. `start()` consults
+ * the gate before its request; when a request is not allowed yet it waits, up to
+ * `START_RETRY_WAIT_MS` of wall time, and re-decides as the state moves. No
+ * simulated time passes while it waits (the driver does not step an engine that
+ * has not started). If the bound cannot be met the run reports `unable` with the
+ * `service-budget` cause and sends NO request — a startup that punched through a
+ * spent window would spend it twice and rate-limit the run that follows it.
  *
  * ## The one rule that makes replay exact
  *
@@ -68,10 +102,10 @@
  * ## Holding the last good policy (the tail, and every slow refresh)
  *
  * A policy is FRESH for `ttlMs` after its acceptance and may keep governing for
- * up to `maxHoldMs` (default `MAX_HOLD_TTLS` freshness windows) when nothing has
- * replaced it. Past the freshness window it is reported as HELD, not as fresh:
- * `heldMs` counts the part of the governed time a held policy governed, and the
- * run says so out loud.
+ * up to `maxHoldMs` (default: four service cadences — see the constant) when
+ * nothing has replaced it. Past the freshness window it is reported as HELD, not
+ * as fresh: `heldMs` counts the part of the governed time a held policy
+ * governed, and the run says so out loud.
  *
  * Why this exists, measured rather than assumed: the app's paced playback lets a
  * remote model answer inside the refresh window, but the run's last stretch is
@@ -121,8 +155,15 @@
  */
 import type { ObservationFrame } from "@/sim/observations";
 import type { CityPartition } from "@/sim/regions";
-import { JevClientError, type JevClient, type JevClientFailure } from "./client";
+import {
+  JevClientError,
+  clientRetryAfterMs,
+  isJevClientFailure,
+  type JevClient,
+  type JevClientFailure,
+} from "./client";
 import { buildJevPolicyRequest, jevPolicyContext, type JevRequestOptions } from "./request";
+import { serviceStatusSince, type JevServiceGate, type JevServiceStatus } from "./scheduler";
 import { parseJevPolicy, type JevPolicy, type JevPolicyRequest } from "./schema";
 import {
   createJevRefreshTelemetryRecorder,
@@ -140,32 +181,81 @@ import {
 } from "./trace";
 
 export const JEV_RUNTIME_DEFAULTS = {
-  /** Simulated ms between citywide requests. At 8x playback the old 5 s
-   * cadence sent about 90/min and the live Gateway returned 429 repeatedly;
-   * 20 s targets about 23/min without changing any simulation timestep. */
+  /**
+   * Simulated ms between refresh WINDOWS — the grid on which the runtime
+   * considers asking. It is NOT the rate the service is asked at: every window
+   * is additionally subject to the wall-clock service budget (jev/scheduler.ts),
+   * which spends the measured upstream allowance evenly. The grid is finer than
+   * the budget on purpose, so the schedule is decided by what the service can
+   * answer rather than by this constant. At 8x playback a window is 2.5 s of
+   * wall time.
+   */
   REFRESH_MS: 20_000,
-  /** Simulated ms a policy stays FRESH after acceptance (three windows). */
-  TTL_MS: 60_000,
+  /**
+   * Simulated ms between SUCCESSFUL policies the service can sustainably
+   * provide, at the shipped playback. DERIVED, not chosen: the measured
+   * upstream allowance is 5 requests per 60 s window, jev/scheduler.ts spends at
+   * most 4 of them (one request per 15 s of wall time), and the shipped playback
+   * is 8.0x (SIM_TICK_MS x PLAYBACK_STEPS_PER_TICK) — 15 s x 8.0 = 120 s.
+   * tests/jev-quota-scheduler.test.ts pins that arithmetic against the playback
+   * constants, so this number cannot drift away from the schedule it describes.
+   */
+  SERVICE_CADENCE_SIM_MS: 120_000,
+  /**
+   * Simulated ms a policy stays FRESH after acceptance: 1.5 service cadences.
+   * One cadence is when its replacement is due; the extra half covers the
+   * window grid's own granularity (REFRESH_MS) plus scheduling jitter, so a
+   * healthy run is FRESH rather than held and a failed refresh is what turns
+   * time HELD — which is the distinction `heldMs` exists to make.
+   */
+  TTL_MS: 180_000,
   /** Simulated ms a newly accepted policy is held before another may replace it. */
   MIN_HOLD_MS: 5_000,
   /**
-   * How many freshness windows one accepted policy may keep governing without a
-   * replacement, before the run is INVALIDATED. Derived from a measurement, not
-   * chosen for roundness: the curated trips arrive 152-202 s of simulated time
-   * before the 600 s horizon, and the back-to-back tail after arrival is where
-   * the old one-window rule handed a third of every run to the Adaptive
-   * fallback (measured 26.7%, 140 s of it in the tail, with a perfect model).
-   * Five windows (5 x 60 s = 300 s) covers that tail with margin while still
-   * ending a run whose model has genuinely gone silent.
+   * How many service cadences one accepted policy may keep governing without a
+   * replacement, before the run is INVALIDATED. Derived from the schedule this
+   * run actually asks on, not from roundness:
+   *
+   *   one cadence                                  120 s simulated
+   *   one transient 5xx (cadence + its 2x backoff)  360 s simulated
+   *   two in a row (cadence + backoff + backoff)    480 s simulated
+   *
+   * Four cadences (480 s = 60 s of wall time at 8x) therefore covers the worst
+   * case a healthy-but-unlucky run can produce, and still ends a run whose model
+   * has genuinely gone silent. It deliberately does NOT cover an upstream
+   * `retry-after` of the largest value ever measured (60 s of wall time = 480 s
+   * simulated ON TOP of the cadence): making that fit would mean a maximum hold
+   * at the horizon itself, which is exactly the unbounded hold this contract
+   * refuses. The scheduler's first duty is to make a retry-after unnecessary by
+   * never filling the measured window; a run the provider does refuse is
+   * reported invalid rather than kept alive by a hold that can never fire.
    */
-  MAX_HOLD_TTLS: 5,
+  MAX_HOLD_CADENCES: 4,
   /**
    * How many times the STARTUP gate may ask for its first policy before it
    * reports the run as unable to start. Two: one retry for a service that was
-   * briefly unavailable, and then the truth — never a different controller.
+   * briefly unavailable — the retry waits the scheduler's own backoff rather
+   * than firing immediately — and then the truth, never a different controller.
    */
   START_ATTEMPTS: 2,
+  /**
+   * Longest wall-clock pause the STARTUP gate will spend waiting for the
+   * service to become eligible, measured PER WAIT — before its FIRST request as
+   * well as before its retry. One measured window: a service that asks for
+   * longer than its own window is not briefly unavailable, and a run must not
+   * begin minutes late without saying so. (The gate may make at most
+   * `START_ATTEMPTS` requests, so a startup's whole wait is bounded by twice
+   * this, and its requests by the two attempts.) A startup that cannot be made
+   * inside its bound reports the run as unable (`service-budget`) and sends no
+   * request at all; it never asks anyway, because a request the schedule forbids
+   * is exactly the request that gets the run — and the next one — rate-limited.
+   */
+  START_RETRY_WAIT_MS: 60_000,
 } as const;
+
+/** One accepted policy may keep governing for this long without a replacement. */
+export const JEV_MAX_HOLD_MS =
+  JEV_RUNTIME_DEFAULTS.SERVICE_CADENCE_SIM_MS * JEV_RUNTIME_DEFAULTS.MAX_HOLD_CADENCES;
 
 /**
  * Why a run could not start, why an answer was not used, or why Jev was lost. A
@@ -186,7 +276,17 @@ export type JevCause =
   /** An answer arrived inside the minimum-hold window and was refused. */
   | "held"
   /** An answer belonged to a superseded request or a scenario that moved. */
-  | "superseded";
+  | "superseded"
+  /**
+   * The STARTUP gate could not obtain its first policy inside its bounded wait:
+   * the run's share of the measured service window was not available in time
+   * (spent by earlier runs in this session, a cadence that has not passed, a
+   * `retry-after` or a backoff longer than a run may wait to start). NO request
+   * was made — the schedule forbade one — so this is a scheduling fact about the
+   * service, not a transport failure, and it is never counted as a refusal from
+   * the service because the service was never asked.
+   */
+  | "service-budget";
 
 /** Every cause, for validation, counting and label coverage. */
 export const JEV_CAUSES = [
@@ -195,6 +295,7 @@ export const JEV_CAUSES = [
   "expired",
   "held",
   "superseded",
+  "service-budget",
   "timeout",
   "rate-limited",
   "upstream-error",
@@ -251,6 +352,16 @@ export function clientFailureCause(error: unknown): JevCause {
 /** Per-cause counts: only the causes that actually happened appear. */
 export type JevCauseCounts = Readonly<Partial<Record<JevCause, number>>>;
 
+/**
+ * The TRANSPORT half of a cause. `JevCause` also carries lifecycle facts
+ * (unconfigured, held, superseded, …) which are not service behaviour; the
+ * scheduler only ever acts on what the transport said, so anything outside that
+ * vocabulary is reported to it as `unknown` rather than silently ignored.
+ */
+export function transportFailure(cause: JevCause): JevClientFailure {
+  return isJevClientFailure(cause) ? cause : "unknown";
+}
+
 export interface JevRuntimeOptions {
   /** null = unconfigured: the runtime can never start a run. */
   readonly client: JevClient | null;
@@ -260,8 +371,11 @@ export interface JevRuntimeOptions {
   readonly minHoldMs?: number;
   /**
    * How long one accepted policy may keep governing without a replacement.
-   * Defaults to `ttlMs * MAX_HOLD_TTLS`. Must not be shorter than `ttlMs`: a
-   * policy cannot be expected to stop governing before it stops being fresh.
+   * Defaults to `JEV_MAX_HOLD_MS` (the service cadence x `MAX_HOLD_CADENCES`),
+   * never to a multiple of `ttlMs` — the schedule is what decides how long a
+   * silence is survivable, not the freshness window. Must not be shorter than
+   * `ttlMs`: a policy cannot be expected to stop governing before it stops
+   * being fresh.
    */
   readonly maxHoldMs?: number;
   /** How many times the startup gate may ask for its first policy. */
@@ -270,6 +384,26 @@ export interface JevRuntimeOptions {
   /** "replay" consumes the supplied trace instead of calling any client. */
   readonly mode?: "live" | "replay";
   readonly trace?: JevTrace | null;
+  /**
+   * Wall-clock service capacity, or null for "every due window asks". A live run
+   * wires the SESSION's gate (`sessionJevServiceGate`, jev/service-budget.ts —
+   * one gate per application session, because the upstream allowance belongs to
+   * the credential and does not reset when a controller is rebuilt), which is
+   * what keeps a production run inside the measured upstream allowance; a
+   * deterministic run (a mock client, a benchmark, a test) leaves it null and is
+   * byte-identical to what it was before this seam existed. See `observe()` for
+   * where it is consulted: it can only SKIP a request, never make one, and it
+   * never decides anything about the simulation. `start()` consults it too —
+   * startup waits inside its own bound rather than asking when the schedule says
+   * no.
+   */
+  readonly serviceGate?: JevServiceGate | null;
+  /**
+   * The wall clock, used ONLY for the service gate's instants and for the
+   * per-refresh record's correlation timestamps. Injectable so a test can freeze
+   * it; nothing about a policy, a directive or a simulated instant reads it.
+   */
+  readonly now?: () => number;
   /**
    * How many recent refresh events the telemetry keeps (see jev/telemetry.ts).
    * The counters cover every refresh whatever this is; it only bounds the list.
@@ -406,6 +540,14 @@ export interface JevRuntimeStatus {
    * recent windows. See jev/telemetry.ts.
    */
   readonly refreshTelemetry: JevRefreshTelemetry;
+  /**
+   * What the service gate did: requests issued, answers received, refusals by
+   * reason, and how far apart successful policies actually landed. Null when no
+   * gate is wired (a deterministic run). Counts and durations only — a live
+   * run's own account of its service cadence, so a report can quote it instead
+   * of asserting it.
+   */
+  readonly service: JevServiceStatus | null;
   /** Replay events still waiting for their instant. */
   readonly queuedEvents: number;
 }
@@ -465,7 +607,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
   const refreshMs = options.refreshMs ?? JEV_RUNTIME_DEFAULTS.REFRESH_MS;
   const ttlMs = options.ttlMs ?? JEV_RUNTIME_DEFAULTS.TTL_MS;
   const minHoldMs = options.minHoldMs ?? JEV_RUNTIME_DEFAULTS.MIN_HOLD_MS;
-  const maxHoldMs = options.maxHoldMs ?? ttlMs * JEV_RUNTIME_DEFAULTS.MAX_HOLD_TTLS;
+  const maxHoldMs = options.maxHoldMs ?? JEV_MAX_HOLD_MS;
   const startAttempts = options.startAttempts ?? JEV_RUNTIME_DEFAULTS.START_ATTEMPTS;
   for (const [name, value] of [
     ["refreshMs", refreshMs],
@@ -489,6 +631,30 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
   const mode = options.mode ?? "live";
   const client = options.client;
   const configured = client !== null && mode === "live";
+  /**
+   * The wall-clock service budget. Null for every deterministic run (and every
+   * existing test), which is what keeps this seam from changing a single
+   * simulated decision: a gate can only decline to ask.
+   *
+   * It is SHARED across the runs of one session (jev/service-budget.ts): its
+   * window, spacing, retry-after and backoff describe the UPSTREAM allowance,
+   * which does not reset when a controller is rebuilt. So the counters that
+   * describe it are session-wide, and this run keeps the snapshot they had when
+   * it was built — `service` in this runtime's status is the DIFFERENCE, this
+   * run's own requests, while the capacity fields stay the service's current
+   * state. Nothing else about a run crosses that boundary: the policy, the
+   * trace, the fingerprint, the generation and the telemetry are per-run.
+   */
+  const gate = options.serviceGate ?? null;
+  let serviceBaseline: JevServiceStatus | null = gate === null ? null : gate.status();
+  /**
+   * The run's own service view, FROZEN when the run ends: a finished run's
+   * account of its own requests must not grow because a later run in the same
+   * session spent more of the shared window.
+   */
+  let serviceFrozen: JevServiceStatus | null = null;
+  /** The wall clock. Read only for the gate and for correlation timestamps. */
+  const now = options.now ?? Date.now;
   const clientId = client?.id ?? (mode === "replay" ? "replay" : "none");
   /** The per-refresh record. Passive: it observes, it never decides. */
   const telemetry: JevRefreshTelemetryRecorder = createJevRefreshTelemetryRecorder({
@@ -584,7 +750,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
       // a client is an outside seam, and the record's rule is absolute — no
       // upstream prose, ever. The classified cause is what a report needs.
       detail: kind === "client-error" ? refreshDetailForCause(cause) : detail,
-      settledAtEpochMs: Date.now(),
+      settledAtEpochMs: now(),
       governing: policyInForceAt(atSimMs),
     });
     options.onRejected?.(lastRejection);
@@ -787,7 +953,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
     // is live, and what the answer cost rides on the same event.
     telemetry.accept({
       generation: context.requestGeneration,
-      settledAtEpochMs: Date.now(),
+      settledAtEpochMs: now(),
       clamped: notes?.clamped ?? 0,
       dropped: notes?.dropped ?? 0,
     });
@@ -823,9 +989,14 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
     refreshes += 1;
     inFlightGeneration = requestGeneration;
     lastRequestAtSimMs = nowMs;
+    // The request is issued now, and the wall-clock service budget is told so
+    // BEFORE the client is called: a request that never settles still spent a
+    // slot in the measured window, and a scheduler that forgot it would spend
+    // that slot twice.
+    gate?.issued(now());
     // The new refresh window opens here: its wall-clock instant is recorded for
     // correlating a run with logs, and everything else about it stays simulated.
-    telemetry.begin({ atEpochMs: Date.now(), atSimMs: nowMs, generation: requestGeneration });
+    telemetry.begin({ atEpochMs: now(), atSimMs: nowMs, generation: requestGeneration });
     /** Release the slot only if this request still owns it. */
     const release = (): void => {
       if (inFlightGeneration === requestGeneration) {
@@ -833,6 +1004,9 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
       }
     };
     const settle = (raw: unknown): void => {
+      // The service answered, whatever the run then decides to do with the
+      // answer: the budget question is settled, so the backoff (if any) is over.
+      gate?.succeeded(now());
       consider(raw, {
         requestGeneration,
         requestFingerprint,
@@ -849,6 +1023,14 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         (answer as Promise<unknown>)
           .then(settle)
           .catch((error: unknown) => {
+            // The budget is told about the failure even when the run is over:
+            // the request really was made, and a late refusal is still a
+            // refusal the next run must not repeat.
+            gate?.failed({
+              cause: transportFailure(clientFailureCause(error)),
+              retryAfterMs: clientRetryAfterMs(error),
+              atEpochMs: now(),
+            });
             if (runClosed) {
               return; // the run is over: a late failure cannot change its record
             }
@@ -866,6 +1048,11 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         release();
       }
     } catch (error: unknown) {
+      gate?.failed({
+        cause: transportFailure(clientFailureCause(error)),
+        retryAfterMs: clientRetryAfterMs(error),
+        atEpochMs: now(),
+      });
       reject(
         "client-error",
         nowMs,
@@ -877,9 +1064,34 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
     }
   };
 
+  /** The honest outcome of a startup the service schedule will not allow. */
+  const unableForServiceBudget = (attempt: number): JevStartUnable => ({
+    state: "unable",
+    reason: "service-budget",
+    // The gate's own sentence says WHICH scheduling fact stands in the way
+    // (a spent window, the cadence, a retry-after, a backoff), in this
+    // codebase's words — never upstream text, and never a request.
+    detail: gate === null ? refreshDetailForCause("service-budget") : gate.waitDetail(),
+    // Requests actually made. The attempt that found the schedule closed made
+    // none, so a run blocked before its first request reports zero — the same
+    // number an unconfigured run reports, and for the same reason.
+    attempts: Math.max(0, attempt - 1),
+  });
+
   /**
-   * ONE startup attempt: ask for the first policy at `nowMs` (0 for a fresh run,
-   * because no simulated time has passed) and report whether it was accepted.
+   * ONE startup attempt: consult the service schedule, WAIT inside the startup
+   * bound if a request is not allowed yet, and only then ask for the first
+   * policy. Returns the honest `unable` when the bound cannot be met.
+   *
+   * STARTUP IS NOT AN EXCEPTION TO THE SCHEDULE. The gate guards the UPSTREAM
+   * allowance, and the upstream does not care that this is the first request of
+   * a new run: a startup that punched through a spent window would spend it
+   * twice, get 429s, and cost the NEXT run its budget as well. So a run whose
+   * first request is not allowed right now waits — up to
+   * `START_RETRY_WAIT_MS`, with no simulated time passing, because the driver
+   * does not step an engine that has not started — and if the service cannot
+   * allow a request inside that bound the run reports itself unable instead of
+   * asking anyway.
    */
   const attemptStart = (
     observation: JevRuntimeObservation,
@@ -903,6 +1115,40 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         attempts: 0,
       };
     }
+    // Narrowed once: every path below asks with a real client, and the closures
+    // that outlive this call keep the same one.
+    const policyClient: JevClient = client;
+    if (gate !== null) {
+      // ONE decision, read once: consulting the gate is a question with a
+      // counter behind it, and asking it twice would count one refusal twice.
+      const decision = gate.eligibility();
+      if (!decision.ok) {
+        if (decision.waitMs > JEV_RUNTIME_DEFAULTS.START_RETRY_WAIT_MS) {
+          return unableForServiceBudget(attempt);
+        }
+        return gate
+          .waitUntilEligible({ maxWaitMs: JEV_RUNTIME_DEFAULTS.START_RETRY_WAIT_MS })
+          .then((eligible) =>
+            eligible
+              ? issueStartRequest(observation, attempt, nowMs, policyClient)
+              : unableForServiceBudget(attempt),
+          );
+      }
+    }
+    return issueStartRequest(observation, attempt, nowMs, policyClient);
+  };
+
+  /**
+   * The request itself: build it, tell the schedule it was issued, hand it to
+   * the client, and resolve what came back. Only ever called when the gate says
+   * a request may be made at this instant.
+   */
+  const issueStartRequest = (
+    observation: JevRuntimeObservation,
+    attempt: number,
+    nowMs: number,
+    policyClient: JevClient,
+  ): JevStartOutcome | Promise<JevStartOutcome> => {
     const request: JevPolicyRequest = buildJevPolicyRequest(
       {
         frame: observation.frame,
@@ -919,7 +1165,8 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
     refreshes += 1;
     inFlightGeneration = requestGeneration;
     lastRequestAtSimMs = nowMs;
-    telemetry.begin({ atEpochMs: Date.now(), atSimMs: nowMs, generation: requestGeneration });
+    gate?.issued(now());
+    telemetry.begin({ atEpochMs: now(), atSimMs: nowMs, generation: requestGeneration });
     const release = (): void => {
       if (inFlightGeneration === requestGeneration) {
         inFlightGeneration = null;
@@ -941,6 +1188,10 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
     /** Retry while the budget allows; otherwise report the truth. */
     const settleOrRetry = (raw?: unknown, error?: unknown): JevStartOutcome | Promise<JevStartOutcome> => {
       if (raw !== undefined || error === undefined) {
+        // The gate's startup request was answered, whatever the run then makes
+        // of the answer: the budget question is settled and any backoff a
+        // previous attempt left behind is over.
+        gate?.succeeded(now());
         consider(raw, {
           requestGeneration,
           requestFingerprint,
@@ -951,6 +1202,14 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
           regionIds: policyContext.regionIds,
         });
       } else {
+        // The gate is told the same way a mid-run refresh tells it, so a 5xx at
+        // startup backs off exactly like a 5xx later instead of firing the
+        // retry into the same outage.
+        gate?.failed({
+          cause: transportFailure(clientFailureCause(error)),
+          retryAfterMs: clientRetryAfterMs(error),
+          atEpochMs: now(),
+        });
         reject(
           "client-error",
           nowMs,
@@ -960,12 +1219,27 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         );
       }
       if (accepted === null && attempt < startAttempts) {
-        return attemptStart(observation, attempt + 1);
+        if (gate === null) {
+          // No gate: unchanged behaviour, and synchronous for a synchronous
+          // client. A deterministic run must not be forced through the event
+          // loop to obtain its first policy.
+          return attemptStart(observation, attempt + 1);
+        }
+        // The retry waits the scheduler's own backoff or retry-after rather than
+        // firing immediately — a startup retry is still a request, and a burst
+        // of two is what the budget exists to prevent. A service that asks for
+        // longer than a run can wait is reported as unable to start, not as a
+        // run that begins late.
+        return gate
+          .waitUntilEligible({ maxWaitMs: JEV_RUNTIME_DEFAULTS.START_RETRY_WAIT_MS })
+          .then((eligible) =>
+            eligible ? attemptStart(observation, attempt + 1) : outcome(),
+          );
       }
       return outcome();
     };
     try {
-      const answer = client.requestPolicy(request);
+      const answer = policyClient.requestPolicy(request);
       if (isPromiseLike(answer)) {
         return answer
           .then((raw) => settleOrRetry(raw))
@@ -1031,7 +1305,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         if (refreshDue(nowMs, refreshMs)) {
           if (!configured) {
             telemetry.skip({
-              atEpochMs: Date.now(),
+              atEpochMs: now(),
               atSimMs: nowMs,
               governing: policyInForceAt(nowMs),
               reason: "other",
@@ -1043,7 +1317,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
             // unpaced burst that gets the run rate-limited. The last accepted
             // policy governs this window, reported as held.
             telemetry.skip({
-              atEpochMs: Date.now(),
+              atEpochMs: now(),
               atSimMs: nowMs,
               governing: policyInForceAt(nowMs),
               reason: "other",
@@ -1051,7 +1325,7 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
             });
           } else if (inFlightGeneration !== null) {
             telemetry.skip({
-              atEpochMs: Date.now(),
+              atEpochMs: now(),
               atSimMs: nowMs,
               governing: policyInForceAt(nowMs),
               reason: "gap",
@@ -1061,6 +1335,19 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
             // The startup gate asked at this exact simulated instant. That IS
             // this refresh window, so nothing is asked again and nothing is
             // recorded twice.
+          } else if (gate !== null && !gate.eligibility().ok) {
+            // The wall-clock service budget declined this window. This is a
+            // SCHEDULING fact, not a failure: no request was made, nothing was
+            // substituted, and the policy in force keeps governing. The window
+            // is recorded with its own reason so the run can say where the
+            // service's cadence — rather than a refusal — cost it freshness.
+            telemetry.skip({
+              atEpochMs: now(),
+              atSimMs: nowMs,
+              governing: policyInForceAt(nowMs),
+              reason: "gap",
+              detail: gate.waitDetail(),
+            });
           } else {
             startRequest(observation, nowMs);
           }
@@ -1123,6 +1410,9 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
 
     finish(atSimMs) {
       runClosed = true;
+      // The run is over: freeze its own view of the shared gate's counters, so
+      // what this result reports about its requests cannot change afterwards.
+      serviceFrozen = gate === null ? null : serviceStatusSince(gate.status(), serviceBaseline);
       // Whatever was in flight arrived after the run: it can govern nothing, so
       // its refresh window stays unresolved rather than being guessed.
       inFlightGeneration = null;
@@ -1177,7 +1467,12 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
       invalid = null;
       acceleratedTail = false;
       runClosed = false;
-      // A reset is a new run: the per-refresh record starts over with it.
+      // A reset is a new run: the per-refresh record starts over with it, and so
+      // does this run's own view of the service counters. The SERVICE BUDGET
+      // itself is NOT reset — it belongs to the session, not to the run, and the
+      // upstream allowance does not come back because a scenario did.
+      serviceBaseline = gate === null ? null : gate.status();
+      serviceFrozen = null;
       telemetry.reset();
 
       const trace = next.trace ?? null;
@@ -1242,6 +1537,18 @@ export function createJevPolicyRuntime(options: JevRuntimeOptions): JevRuntime {
         clamped: clampedCount,
         dropped: droppedCount,
         refreshTelemetry: telemetry.summary(),
+        // The wall-clock service budget's own account: how many requests THIS
+        // RUN issued, what came back, and how far apart the successful ones
+        // landed. The counters are the difference from what the shared gate
+        // already held when this run was built — frozen once the run is over, so
+        // a later run cannot change what this one reports. The capacity fields
+        // (window occupancy, the next eligible instant, a pause in force) are
+        // the service's current state, because the window is shared. Null for a
+        // run with no gate (every deterministic run).
+        service:
+          gate === null
+            ? null
+            : serviceFrozen ?? serviceStatusSince(gate.status(), serviceBaseline),
         queuedEvents: queue.length,
       };
     },

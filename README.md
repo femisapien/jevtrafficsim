@@ -150,13 +150,34 @@ JEV_TIMEOUT_MS=12000   # the free evaluation tier is variable; a tight
 
 `JEV_ENDPOINT` is the alternative backend: a service that speaks the Jev policy schema
 directly. The two are never mixed: `JEV_MODEL` selects the gateway.
-The default policy refresh is every 20 simulated seconds (about 2.5 wall-clock
-seconds in the 8× browser playback); the previous 5-second cadence hit AI Gateway
-429s during a full run. A timed-out or rate-limited request remains an explicit
-fallback with its cause named, never a hidden live policy, but it no longer
-costs the run: the last accepted policy keeps governing (bounded by a maximum
-hold of five freshness windows) while the next answer is fetched, and the run
-reports the time that policy covered as *held*.
+The policy refresh is scheduled from **wall-clock service capacity**, not from a
+simulated constant. `jev/scheduler.ts` spends at most **4 of the 5 requests per ~60 s
+window** the AI Gateway advertises for `typesafe-ai/jev` (measured:
+`x-ratelimit-limit-requests: 5` on every rejection, with a `retry-after` of 27–60 s) —
+one request every 15 s of wall time. At the 8× browser playback that is a fresh policy
+every ~120 simulated seconds, which is the freshest stream the measured allowance
+sustains. The previous fixed cadence asked for ~24 requests/minute against a 5-per-window
+allowance: two thirds of a full run's refreshes came back 429, and the run was
+invalidated when no fresh policy arrived before the last one's maximum hold. An explicit
+`retry-after` is honoured to the millisecond (the relay forwards it to the browser as a
+bounded number), a transient 5xx backs off instead of retrying in a burst, and a
+successful answer clears that backoff. The gate is the SESSION's, not the controller's
+(`jev/service-budget.ts`): the allowance belongs to the credential the relay holds, so a
+rebuilt controller — a reset, a new scenario, the next run — inherits the window the
+previous run spent and waits for it, instead of asking as if nothing had been spent. The
+startup gate goes through the same schedule: a run whose first request the service cannot
+allow inside its bound reports itself unable and sends nothing. Scope, stated honestly:
+this keeps ONE session's runs inside the allowance, and it is what the measured 429s came
+from; two tabs each hold their own session gate and can still jointly exceed a
+credential-wide allowance, so a guarantee across tabs/users would need shared state at the
+relay (a durable token bucket) or a Vercel Firewall rule sized to the upstream allowance —
+instance-local serverless memory is not a global coordinator and is not presented as one.
+
+A refused or failed request never substitutes anything: the last accepted policy keeps
+governing — reported as *held* once it is past its freshness window, bounded by a maximum
+hold of four service cadences — and the run reports the time that policy covered as
+*held*. A run whose policy outlives that hold is invalidated and says so; it is never
+continued under another controller.
 
 That hold exists for a measured reason. The run's last stretch, after the ego
 car arrives, is simulated back to back so the visible run covers

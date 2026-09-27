@@ -58,6 +58,8 @@ import {
   JEV_DEFAULT_TIMEOUT_MS,
   JEV_DROPPED_HEADER,
   JEV_REASON_HEADER,
+  JEV_RETRY_AFTER_HEADER,
+  clientRetryAfterMs,
   type JevClient,
   type JevClientFailure,
 } from "@/jev/client";
@@ -285,9 +287,24 @@ export function failureClass(error: unknown): JevClientFailure {
  * pinned contract), and the class travels beside it in `x-jev-reason`, which is
  * what lets the browser say "the model did not answer in time" instead of a
  * generic failure. Both channels are this codebase's own closed vocabulary.
+ *
+ * When the service named a pause, its LENGTH travels too, as a number in
+ * `x-jev-retry-after-ms`. Without it the browser can only guess how long to
+ * wait, retries into the same closed window and collects a second 429 — which is
+ * how a burst of retries turns one rate limit into four. No upstream string
+ * crosses this line: the header is an integer this codebase parsed and bounded.
  */
-function refusal(status: number, error: string, failure: JevClientFailure): Response {
-  return Response.json({ error }, { status, headers: { [JEV_REASON_HEADER]: failure } });
+function refusal(
+  status: number,
+  error: string,
+  failure: JevClientFailure,
+  retryAfterMs: number | null = null,
+): Response {
+  const headers: Record<string, string> = { [JEV_REASON_HEADER]: failure };
+  if (retryAfterMs !== null) {
+    headers[JEV_RETRY_AFTER_HEADER] = String(retryAfterMs);
+  }
+  return Response.json({ error }, { status, headers });
 }
 
 export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | null {
@@ -424,6 +441,6 @@ export async function POST(request: Request): Promise<Response> {
   } catch (error) {
     // Bounded by construction: a status or the word "timeout", never a body.
     console.error("[jev-relay] policy request failed:", failureReason(error));
-    return refusal(502, "jev service request failed", failureClass(error));
+    return refusal(502, "jev service request failed", failureClass(error), clientRetryAfterMs(error));
   }
 }

@@ -17,6 +17,7 @@ import { createFixedController } from "@/controllers/fixed";
 import { createJevController } from "@/controllers/jev";
 import type { TrafficController } from "@/controllers/contract";
 import { createRelayJevClient, JEV_RELAY_TIMEOUT_MS } from "@/jev/client";
+import { sessionJevServiceGate } from "@/jev/service-budget";
 import { CHICAGO_SCALE_LABELS } from "@/cities/chicago";
 import { METRO_SCALE_INDEX } from "@/cities/chicago-trips";
 import { materializeChallengeTrip } from "@/worker/ego-spawn";
@@ -152,9 +153,25 @@ function makeController(choice: ControllerChoice, identity: string) {
   if (choice === "jev") {
     // Browser path: the relay client asks our own route, which is the only
     // place the service credential lives. Nothing secret reaches this worker.
+    //
+    // The service gate is the wall-clock half of the refresh schedule
+    // (jev/scheduler.ts): the upstream allowance is 5 requests per ~60 s window
+    // and the app's old cadence asked for ~24/minute, which is what turned two
+    // thirds of a production run's refreshes into 429s and invalidated the run
+    // when no fresh policy arrived in time. The gate spends 4 of those 5
+    // requests, evenly, and honours a `retry-after` our relay forwards.
+    //
+    // It is the SESSION's gate (jev/service-budget.ts), NOT a new one per
+    // controller: the allowance belongs to the credential our relay holds, so a
+    // rebuilt controller — a reset, a new scenario, the next run — must inherit
+    // the window the previous run spent rather than start from an empty one.
+    // One gate per run is what produced "run A spends the window, run B asks
+    // anyway, 429s return"; one gate per session is what makes the second run
+    // wait for the budget the first one really used.
     return createJevController({
       client: createRelayJevClient({ timeoutMs: JEV_RELAY_TIMEOUT_MS }),
       scenarioFingerprint: identity,
+      serviceGate: sessionJevServiceGate(),
     });
   }
   return choice === "adaptive" ? createAdaptiveController() : createFixedController();

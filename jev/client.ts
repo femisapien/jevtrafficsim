@@ -36,6 +36,15 @@ import type { JevPolicyRequest } from "./schema";
 export const JEV_REASON_HEADER = "x-jev-reason";
 export const JEV_CLAMPED_HEADER = "x-jev-clamped";
 export const JEV_DROPPED_HEADER = "x-jev-dropped";
+/**
+ * How long the service asked the caller to wait, in wall MILLISECONDS. The relay
+ * forwards the upstream `retry-after` under this name (see
+ * app/api/jev/policy/route.ts) because the browser path never sees an upstream
+ * header: without it the app would retry into the same closed window and collect
+ * a second 429 instead of waiting the pause it was given. Milliseconds, not
+ * seconds, so the unit cannot be misread.
+ */
+export const JEV_RETRY_AFTER_HEADER = "x-jev-retry-after-ms";
 
 /**
  * How a policy request failed, in the smallest vocabulary that can be reported
@@ -72,14 +81,61 @@ export function isJevClientFailure(value: unknown): value is JevClientFailure {
  * A transport failure, carrying its bounded class. The message is always this
  * module's own text (or the relay's own short sentence), never an upstream
  * body, so it is safe to count and to keep in a rejection record.
+ *
+ * `retryAfterMs` is the one piece of upstream rate-limit metadata worth keeping:
+ * a NUMBER, bounded, and the only thing that lets a caller wait the pause the
+ * service actually asked for instead of guessing (see jev/scheduler.ts). It is
+ * null whenever the service did not say, and it is never a string from the wire.
  */
 export class JevClientError extends Error {
   readonly failure: JevClientFailure;
-  constructor(failure: JevClientFailure, message: string) {
+  readonly retryAfterMs: number | null;
+  constructor(failure: JevClientFailure, message: string, retryAfterMs: number | null = null) {
     super(message);
     this.name = "JevClientError";
     this.failure = failure;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * The pause a service asked for, in wall ms, from the headers it can say it in:
+ * the standard `retry-after` (delta-seconds; an HTTP-date is not a duration and
+ * is ignored rather than guessed at), then this codebase's own
+ * `x-jev-retry-after-ms` on the relay path, then the gateway's
+ * `x-ratelimit-reset-requests` (a `40s`-shaped value). Anything absent, junk,
+ * negative or longer than ten minutes is null: a bound the scheduler then
+ * replaces with its own cadence.
+ */
+export function retryAfterMsFromHeaders(headers: Headers): number | null {
+  const seconds = Number(headers.get("retry-after"));
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return boundedRetryAfter(seconds * 1_000);
+  }
+  const millis = Number(headers.get(JEV_RETRY_AFTER_HEADER));
+  if (Number.isFinite(millis) && millis > 0) {
+    return boundedRetryAfter(millis);
+  }
+  const reset = /^(\d+)\s*s?$/.exec(headers.get("x-ratelimit-reset-requests") ?? "");
+  if (reset !== null) {
+    return boundedRetryAfter(Number(reset[1]) * 1_000);
+  }
+  return null;
+}
+
+/** Ten minutes: longer than any pause worth waiting for inside one run. */
+const MAX_RETRY_AFTER_MS = 600_000;
+
+function boundedRetryAfter(valueMs: number): number | null {
+  if (!Number.isFinite(valueMs) || valueMs <= 0) {
+    return null;
+  }
+  return Math.min(MAX_RETRY_AFTER_MS, Math.ceil(valueMs));
+}
+
+/** The pause a thrown client failure asked for, or null. Safe on any error. */
+export function clientRetryAfterMs(error: unknown): number | null {
+  return error instanceof JevClientError ? error.retryAfterMs : null;
 }
 
 /** What one answer cost, in counts only: never upstream text, never a policy. */
@@ -249,10 +305,13 @@ export function createHttpJevClient(options: HttpJevClientOptions): JevClient {
         );
       }
       if (!response.ok) {
-        // Status only: response bodies can echo credentials back.
+        // Status only: response bodies can echo credentials back. The bounded
+        // pause the service asked for travels with the class, so a caller can
+        // wait it instead of retrying into the same closed window.
         throw new JevClientError(
           failureFromStatus(response.status, response.headers.get(JEV_REASON_HEADER)),
           `jev service responded ${response.status}`,
+          retryAfterMsFromHeaders(response.headers),
         );
       }
       const body = (await response.json()) as unknown;
@@ -327,10 +386,12 @@ export function createRelayJevClient(options: RelayJevClientOptions = {}): JevCl
         | { policy?: unknown; error?: string; clamped?: unknown; dropped?: unknown }
         | null;
       if (!response.ok || body === null || body.policy === undefined) {
-        // The relay's own short sentence, plus the bounded class it reported.
+        // The relay's own short sentence, plus the bounded class it reported —
+        // and the pause it was asked to wait, when the service named one.
         throw new JevClientError(
           failureFromStatus(response.status, response.headers.get(JEV_REASON_HEADER)),
           body?.error ?? `jev relay responded ${response.status}`,
+          retryAfterMsFromHeaders(response.headers),
         );
       }
       notes = notesOf(response.headers, body);

@@ -44,6 +44,7 @@ import type { JevClient } from "./client";
 import {
   JevClientError,
   failureFromStatus,
+  retryAfterMsFromHeaders,
   type JevAnswerNotes,
 } from "./client";
 
@@ -498,10 +499,15 @@ export function createGatewayJevClient(options: GatewayJevClientOptions): JevCli
       });
       if (!response.ok) {
         // Status only: an upstream error body can echo credentials back. The
-        // class travels with the error so the relay can report WHY it failed.
+        // class travels with the error so the relay can report WHY it failed,
+        // and the bounded pause travels with it too: a 429 carries the
+        // provider's own `retry-after` (and `x-ratelimit-reset-requests` when
+        // that is all it says), which is the only rate-limit metadata the
+        // gateway ever sends — an accepted answer carries none at all.
         throw new JevClientError(
           failureFromStatus(response.status, null),
           `jev gateway responded ${response.status}`,
+          retryAfterMsFromHeaders(response.headers),
         );
       }
       const json = (await response.json()) as unknown;

@@ -217,6 +217,37 @@ describe("jev server boundary", () => {
     expect(JSON.parse(text)).toEqual({ error: "jev service request failed" });
   });
 
+  it("forwards the pause a rate-limited gateway asked for, as a bounded number", async () => {
+    // The measured shape of an upstream 429: `retry-after` plus the provider's
+    // own limit headers. The browser never sees an upstream header, so without
+    // this the app can only guess how long to wait and retries into the same
+    // closed window.
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: { type: "rate_limit_exceeded" } }), {
+        status: 429,
+        headers: {
+          "retry-after": "40",
+          "x-ratelimit-limit-requests": "5",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset-requests": "40s",
+        },
+      })) as unknown as typeof fetch;
+    const response = await post(request());
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-jev-reason")).toBe("rate-limited");
+    expect(response.headers.get("x-jev-retry-after-ms")).toBe("40000");
+    // Still this codebase's own sentence, and still no upstream prose.
+    expect(JSON.parse(await response.text())).toEqual({ error: "jev service request failed" });
+  });
+
+  it("sends no pause header when the service named none", async () => {
+    globalThis.fetch = (async () =>
+      new Response("upstream is unhappy", { status: 500 })) as unknown as typeof fetch;
+    const response = await post(request());
+    expect(response.status).toBe(502);
+    expect(response.headers.get("x-jev-retry-after-ms")).toBeNull();
+  });
+
   it("rejects a policy that names ids the request never carried", async () => {
     globalThis.fetch = (async () =>
       new Response(

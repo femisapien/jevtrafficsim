@@ -82,6 +82,7 @@ import {
   type JevPolicy,
 } from "@/jev/schema";
 import { adapterFromId, type JevAdapter, type JevPolicySource, type JevTrace, type JevTraceEvent, type JevTraceRecordedRun } from "@/jev/trace";
+import type { JevServiceGate, JevServiceStatus } from "@/jev/scheduler";
 import type { JevRefreshTelemetry } from "@/jev/telemetry";
 import type { IntersectionObservation, PhaseObservation } from "@/sim/observations";
 import type { CityPartition } from "@/sim/regions";
@@ -339,6 +340,14 @@ export interface JevControllerMeta {
    * why" — inspectable after the fact, with nothing upstream-derived in it.
    */
   readonly telemetry: JevRefreshTelemetry;
+  /**
+   * What the wall-clock service budget did: requests issued, answers received,
+   * refusals by reason, and the spacing successful policies actually landed at.
+   * Null for a deterministic run (no gate wired). Counts and durations only, so
+   * this can ride in a run's own account of itself without carrying an instant
+   * that would make two runs of one scenario differ.
+   */
+  readonly service: JevServiceStatus | null;
 }
 
 export interface JevController extends TrafficController {
@@ -390,6 +399,15 @@ export interface JevControllerOptions {
   readonly trace?: JevTrace | null;
   readonly onAccepted?: (event: JevTraceEvent) => void;
   readonly onRejected?: (rejection: JevRejection) => void;
+  /**
+   * Wall-clock service capacity (jev/scheduler.ts), for a LIVE run only: it is
+   * what keeps a production run inside the measured upstream allowance. Left
+   * unset by every deterministic run (tests, the benchmark matrix, a mock
+   * client), which is why adding it changes no existing result.
+   */
+  readonly serviceGate?: JevServiceGate | null;
+  /** The wall clock the gate is read against; injectable for tests. */
+  readonly now?: () => number;
 }
 
 function countActiveVehicles(traffic: TrafficState): number {
@@ -419,6 +437,8 @@ export function createJevController(options: JevControllerOptions): JevControlle
     trace: options.trace,
     onAccepted: options.onAccepted,
     onRejected: options.onRejected,
+    serviceGate: options.serviceGate,
+    now: options.now,
   });
   let effective: JevEffectivePolicy = {
     source: "waiting",
@@ -483,6 +503,7 @@ export function createJevController(options: JevControllerOptions): JevControlle
         clamped: status.clamped,
         dropped: status.dropped,
         telemetry: status.refreshTelemetry,
+        service: status.service,
       };
     },
     directives(city: City, traffic: TrafficState, context?: TrafficControllerContext) {
