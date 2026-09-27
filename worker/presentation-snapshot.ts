@@ -132,8 +132,8 @@ export interface PresentationIncidentMarker {
  * policy that governed past its freshness window was still the model's opinion,
  * but no fresh one arrived in time (`heldMs`), and an answer that had to be
  * clamped or dropped for low confidence was applied imperfectly (`clamped`,
- * `dropped`). Both are reported, so the label can say exactly which of those
- * happened instead of collapsing them into one word.
+ * `dropped`). Both are reported in the run's own record, so an artifact can say
+ * exactly which of those happened instead of collapsing them into one word.
  */
 export interface PresentationPolicy {
   /** Where the decisions come from: a policy (`live`/`replay`), or none at all. */

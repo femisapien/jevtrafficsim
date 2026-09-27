@@ -8,8 +8,8 @@
  *      not for a controller, and not for a raw seed (both are ?debug controls)
  *   2. the visible run is Jev, and the Fixed/Adaptive baselines describe the
  *      SAME world: one fingerprint, one demand, one incident script
- *   3. a run that used the adaptive fallback says so; a run that never had a
- *      live policy does not get to call itself Jev
+ *   3. the public label names the controller — one name, Jev — and a run that
+ *      never had a policy does not get to call itself Jev
  *   4. a run a human touched is not shown beside clean baseline results
  *   5. the baseline worker's request cannot smuggle in a controller
  *   6. result metadata stays consistent with the run it describes
@@ -235,9 +235,10 @@ describe("Fixed, Adaptive and Jev run the same world", () => {
     };
     expect(policyLabel("jev", null)?.text).toBe("Checking Jev");
     expect(policyLabel("jev", cleanRun)?.text).toBe("Jev");
-    // The contract forbids fallback time; if a run ever reported it, the label
-    // says so rather than hiding it behind the plain word Jev.
-    expect(policyLabel("jev", onFallback)?.text).toBe("Jev · fallback used");
+    // The contract forbids fallback time; the label still names the controller,
+    // and the run's own record is what states the violation (fallbackMs, and
+    // the release gate that refuses such a run).
+    expect(policyLabel("jev", onFallback)?.text).toBe("Jev");
     expect(policyLabel("jev", noPolicy)?.text).toBe("Waiting for Jev");
     expect(policyLabel("jev", invalidated)?.text).toBe("Jev · run invalidated");
     expect(policyLabel("jev", { ...cleanRun, source: "replay", liveMs: 0, replayMs: 595_000 })?.text).toBe(
@@ -249,10 +250,10 @@ describe("Fixed, Adaptive and Jev run the same world", () => {
   });
 });
 
-/* --------------------------------------- 3. ungoverned time is visible --- */
+/* ---------------- 3. ungoverned time stays in the run's record ------------ */
 
-describe("ungoverned time is never presented as pure live Jev", () => {
-  it("names every nonzero ungoverned share, including a sub-percent share", () => {
+describe("ungoverned time stays in the run's record, not on the public label", () => {
+  it("keeps every ungoverned share in the record and the label unqualified", () => {
     const at = (invalidMs: number): PresentationPolicy => ({
       source: "live",
       liveMs: 600_000 - invalidMs,
@@ -263,12 +264,13 @@ describe("ungoverned time is never presented as pure live Jev", () => {
       rejected: 1,
       refreshes: 101,
     });
-    const small = policyLabel("jev", at(100));
-    expect(small?.text).toBe("Jev · ungoverned time");
-    expect(small?.detail).toContain("<1% of the run had no Jev policy in force");
+    // A sub-percent share and half the run carry the same public name; the
+    // record is what tells them apart, to the millisecond.
+    expect(policyLabel("jev", at(100))?.text).toBe("Jev");
     expect(policyLabel("jev", at(0))?.text).toBe("Jev");
-    // Half the run: still named, never hidden.
-    expect(policyLabel("jev", at(300_000))?.detail).toContain("50%");
+    expect(policyLabel("jev", at(300_000))?.text).toBe("Jev");
+    expect(policyLabel("jev", at(300_000))?.detail).not.toContain("%");
+    expect(ungovernedShare(at(100))).toBeCloseTo(100 / 600_000, 9);
     expect(ungovernedShare(at(300_000))).toBeCloseTo(0.5, 6);
     // A run that never had a live answer is not a Jev run at all: it is either
     // still waiting for its first policy, or invalidated.

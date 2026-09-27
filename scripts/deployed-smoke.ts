@@ -172,8 +172,8 @@ async function main(): Promise<void> {
     for (const row of rows.slice(0, 6)) {
       console.log("   ", row.replace(/\s+/g, " "));
     }
-    const fallbackLine = comparison.match(/(\d+% of the run on the adaptive fallback|[0-9]+ live policies?)/i);
-    console.log("provenance detail:", fallbackLine?.[0] ?? "(none)");
+    const detailLine = comparison.match(/[0-9]+ policies?/i);
+    console.log("provenance detail:", detailLine?.[0] ?? "(none)");
     const run = await page.evaluate(() => {
       const element = document.querySelector<HTMLElement>("[data-jev-provenance]");
       return element === null ? null : {

@@ -327,9 +327,55 @@ describe("the diagnostic vocabulary never reaches a public surface", () => {
       expect(text, `field "${field}" leaked into the label`).not.toContain(field);
     }
     // The plain words it does use are the product's own.
-    expect(text).toContain("the held policy passed its maximum age");
+    expect(text).toContain("the policy in force passed its maximum age");
     expect(text).toContain("of the run after Jev was lost");
     expect(text).toContain("not a completed Jev result");
+  });
+
+  it("names every Jev-governed run plainly, with no governance vocabulary", () => {
+    // The public label names the controller. How it was governed — fresh, held,
+    // ungoverned, or on a fallback — is the run's record's business, and the
+    // record is where it is read exactly.
+    const base: PresentationPolicy = {
+      source: "live",
+      liveMs: 600_000,
+      replayMs: 0,
+      fallbackMs: 0,
+      accepted: 20,
+      rejected: 0,
+      refreshes: 20,
+    };
+    const governed: readonly PresentationPolicy[] = [
+      base,
+      { ...base, heldMs: 140_000, maxHoldMs: 300_000 },
+      { ...base, liveMs: 480_000, fallbackMs: 120_000, accepted: 3 },
+      { ...base, liveMs: 480_000, invalidMs: 120_000, cause: "superseded" },
+    ];
+    for (const policy of governed) {
+      const label = policyLabel("jev", policy);
+      expect(label?.text, "a Jev-governed run is named Jev").toBe("Jev");
+      expect(`${label?.text ?? ""} ${label?.detail ?? ""}`).not.toMatch(
+        /\b(?:live|held|stale|ungoverned|fallback)\b/i,
+      );
+    }
+    // The states that are not Jev runs keep their own words — and none of the
+    // governance vocabulary reaches them either.
+    const others: readonly PresentationPolicy[] = [
+      { ...base, source: "waiting", liveMs: 0, accepted: 0, cause: "first-policy" },
+      {
+        ...base,
+        source: "invalidated",
+        liveMs: 360_000,
+        invalidMs: 240_000,
+        invalidation: { atSimMs: 360_000, reason: "expired" },
+      },
+    ];
+    for (const policy of others) {
+      const label = policyLabel("jev", policy);
+      expect(`${label?.text ?? ""} ${label?.detail ?? ""}`).not.toMatch(
+        /\b(?:live|held|stale|ungoverned|fallback)\b/i,
+      );
+    }
   });
 });
 

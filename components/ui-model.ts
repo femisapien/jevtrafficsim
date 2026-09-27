@@ -8,7 +8,6 @@ import type { ControllerChoice } from "@/worker/protocol";
 import { DRIVER_DESCRIPTIONS, type DriverStrategy } from "@/sim/driver";
 import { CURATED_TRIPS } from "@/cities/chicago-trips";
 import {
-  heldShare,
   ungovernedShare,
   type PresentationPolicy,
   type PresentationTripProgress,
@@ -790,7 +789,7 @@ export function unavailableIncidentHint(availability: IncidentAvailability): str
 /* ------------------------------------------------------------------ */
 
 export interface PolicyLabel {
-  /** The state word; plain Jev requires proven, exclusively live governance. */
+  /** The word the product shows: the controller's name, or the run's own state. */
   readonly text: string;
   /** One compact line of public truth, or null when there is nothing to add. */
   readonly detail: string | null;
@@ -812,7 +811,7 @@ export function causeReason(cause: JevCause | null | undefined): string | null {
     case "service-budget":
       return "the service window did not allow a request in time";
     case "expired":
-      return "the held policy passed its maximum age";
+      return "the policy in force passed its maximum age";
     case "held":
       return "a fresher answer arrived inside the hold window";
     case "superseded":
@@ -859,20 +858,23 @@ function shareText(share: number): string {
  * Who governed the signals, in the fewest words that stay true.
  *
  *   Checking Jev           no runtime provenance has arrived yet
- *   Waiting for Jev        the run is waiting for its FIRST live policy; no
+ *   Waiting for Jev        the run is waiting for its FIRST policy; no
  *                          simulated time is passing, and it will not start
  *                          until one is accepted
- *   Jev                    the model's policy governed all observed time, freshly
- *   Jev · policy held      it governed all of it, but part was past its refresh
- *                          window: no fresher opinion arrived in time
+ *   Jev                    the controller the user watched
  *   Jev · run invalidated  Jev was LOST: the run stopped with its measurements
  *                          kept, and it is not a completed Jev result
  *   Replay                 a recorded policy run, applied offline
  *
- * Controllers with no external policy (Fixed, Adaptive) label themselves. The
- * Jev states are mutually exclusive and none of them is ever shown for another:
- * a held run is not called ungoverned, and ungoverned time is never hidden
- * behind the plain word Jev.
+ * The run is named for its controller, not for how the controller was doing:
+ * fresh, held, and any simulated time a policy did not cover are the run's own
+ * accounting — `heldMs`, `invalidMs`, `fallbackMs`, the per-refresh outcomes
+ * and reasons — and they are read from the record that carries them
+ * (jev/telemetry.ts, jev/provenance.ts, the harness line, `?debug`,
+ * `__jevDebug`), not from a caption. A run that was not governed by Jev at all
+ * is never named Jev: one still waiting for its first policy is not a Jev run,
+ * and neither is one that lost Jev and stopped. Controllers with no external
+ * policy (Fixed, Adaptive) label themselves.
  */
 export function policyLabel(
   controller: string,
@@ -890,7 +892,7 @@ export function policyLabel(
   if (policy === null) {
     return { text: "Checking Jev", detail: "waiting for run provenance" };
   }
-  const policies = `${policy.accepted} live ${policy.accepted === 1 ? "policy" : "policies"}`;
+  const policies = `${policy.accepted} ${policy.accepted === 1 ? "policy" : "policies"}`;
   if (policy.source === "replay") {
     return { text: "Replay", detail: `${policy.replayMs > 0 ? formatDuration(policy.replayMs) : "recorded"} replayed` };
   }
@@ -907,44 +909,13 @@ export function policyLabel(
         `${reason === null ? "" : ` (${reason})`} · not a completed Jev result`,
     };
   }
-  if (policy.source === "waiting" || (policy.accepted === 0 && (policy.invalidMs ?? 0) === 0)) {
+  if (policy.source === "waiting" || policy.accepted === 0) {
     // No policy has been accepted yet: the run is waiting for its first one and
     // no simulated time is passing. Nothing else is deciding.
     const reason = causeReason(policy.cause);
     return {
       text: "Waiting for Jev",
-      detail: `the run starts once the first live policy arrives${reason === null ? "" : ` · ${reason}`}`,
-    };
-  }
-  if (policy.fallbackMs > 0) {
-    // A state the execution contract FORBIDS: some of this run's time was not
-    // decided by a Jev policy and was not left ungoverned either. Reported
-    // rather than hidden — a broken contract must not read as plain Jev.
-    const reason = causeReason(policy.cause);
-    return {
-      text: "Jev · fallback used",
-      detail: `${shareText(ungovernedShare(policy))} of the run on the adaptive fallback${
-        reason === null ? "" : ` (${reason})`
-      } · ${policies}${imperfectNote(policy)}`,
-    };
-  }
-  if ((policy.invalidMs ?? 0) > 0) {
-    // Time no Jev policy governed, in a run that did not lose Jev for good.
-    const reason = causeReason(policy.cause);
-    return {
-      text: "Jev · ungoverned time",
-      detail: `${shareText(ungovernedShare(policy))} of the run had no Jev policy in force${
-        reason === null ? "" : ` (${reason})`
-      } · ${policies}${imperfectNote(policy)}`,
-    };
-  }
-  const held = policy.heldMs ?? 0;
-  if (held > 0) {
-    // Governed by the model's policy throughout, but part of it was an opinion
-    // nobody had refreshed in time. Named, because it is not the same claim.
-    return {
-      text: "Jev · policy held",
-      detail: `${shareText(heldShare(policy))} of the run on a policy held past its refresh window · ${policies}${imperfectNote(policy)}`,
+      detail: `the run starts once the first policy arrives${reason === null ? "" : ` · ${reason}`}`,
     };
   }
   return { text: "Jev", detail: `${policies}${imperfectNote(policy)}` };

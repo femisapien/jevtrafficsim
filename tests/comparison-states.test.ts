@@ -34,7 +34,7 @@ describe("final comparison states", () => {
     expect(entries.map((entry) => entry.tripTimeMs)).toEqual([jevMs, adaptiveMs, fixedMs]);
   });
 
-  it("makes a stopped run and mixed provenance explicit", () => {
+  it("makes a stopped run and a waiting run explicit, and leaves Jev unqualified", () => {
     // A run still waiting for its first policy, and one that LOST Jev: neither
     // is a Jev result, and neither is presented as one.
     expect(policyLabel("jev", policy(0, 0, 0, "waiting"))?.text).toBe("Waiting for Jev");
@@ -44,8 +44,8 @@ describe("final comparison states", () => {
         invalidation: { atSimMs: 450_000, reason: "expired" },
       })?.text,
     ).toBe("Jev · run invalidated");
-    // Ungoverned time that did not end the run is still named, never hidden.
-    expect(policyLabel("jev", policy(2, 450_000, 150_000))?.text).toBe("Jev · ungoverned time");
+    // Time that no policy covered stays in the record; the label stays a name.
+    expect(policyLabel("jev", policy(2, 450_000, 150_000))?.text).toBe("Jev");
     expect(policyLabel("jev", policy(2, 600_000, 0))?.text).toBe("Jev");
   });
 

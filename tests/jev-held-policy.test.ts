@@ -18,8 +18,8 @@
  *      (maxHoldMs === ttlMs) run on the same drive
  *   3. every fallback says WHY, in a closed vocabulary, and a failure is
  *      classified from the transport rather than from prose
- *   4. the label names the three Jev states distinctly — never calling a held
- *      run a fallback, never hiding a fallback behind the plain word Jev
+ *   4. the public label names the controller — one name, Jev — and the run's
+ *      own record is where held time and ungoverned time stay distinguishable
  *   5. safety stays absolute under a HELD policy: an adversarial policy at the
  *      exact bounds cannot jump a legal minimum green or emit an illegal
  *      directive, held or fresh
@@ -38,7 +38,7 @@ import {
 } from "@/jev/runtime";
 import { JEV_LIMITS, JEV_SCHEMA_VERSION, neutralJevPolicy, type JevPolicyRequest } from "@/jev/schema";
 import { policyLabel, causeReason } from "@/components/ui-model";
-import type { PresentationPolicy } from "@/worker/presentation-snapshot";
+import { heldShare, ungovernedShare, type PresentationPolicy } from "@/worker/presentation-snapshot";
 import { DEFAULT_SIGNAL_TIMING, SIMULATION_TIMESTEP_MS } from "@/sim/config";
 import { createEngine, stepEngine, type EngineState } from "@/sim/engine";
 import { buildObservationFrame } from "@/sim/observations";
@@ -405,7 +405,7 @@ describe("the browser client reports why, and what an answer cost", () => {
 
 /* -------------------------------------------------------- 3. the label ----- */
 
-describe("the provenance label names the state that actually happened", () => {
+describe("the public label names the run; the record names the state", () => {
   const base: PresentationPolicy = {
     source: "live",
     liveMs: 600_000,
@@ -418,20 +418,22 @@ describe("the provenance label names the state that actually happened", () => {
 
   it("keeps plain Jev for a run governed freshly from end to end", () => {
     expect(policyLabel("jev", base)?.text).toBe("Jev");
-    expect(policyLabel("jev", base)?.detail).toBe("20 live policies");
+    expect(policyLabel("jev", base)?.detail).toBe("20 policies");
   });
 
-  it("says a policy was held rather than calling it fresh or a fallback", () => {
+  it("names a held run Jev too, and leaves the held time to the record", () => {
     const held: PresentationPolicy = { ...base, heldMs: 140_000, maxHoldMs: 300_000 };
     const label = policyLabel("jev", held);
-    expect(label?.text).toBe("Jev · policy held");
-    expect(label?.detail).toContain("23% of the run on a policy held past its refresh window");
-    expect(label?.detail).toContain("20 live policies");
+    expect(label?.text).toBe("Jev");
+    expect(label?.detail).toBe("20 policies");
+    // The accounting that left the label is still the record's own: the held
+    // share is a field, not a caption.
+    expect(heldShare(held)).toBeCloseTo(140_000 / 600_000, 9);
     // Never the fallback's words for time the model's policy governed.
     expect(label?.detail).not.toContain("fallback");
   });
 
-  it("names an INVALIDATED run for what it is, with the reason and the imperfections", () => {
+  it("names an INVALIDATED run for what it is, and leaves ungoverned time to the record", () => {
     const stopped: PresentationPolicy = {
       ...base,
       source: "invalidated",
@@ -447,7 +449,7 @@ describe("the provenance label names the state that actually happened", () => {
     expect(label?.text).toBe("Jev · run invalidated");
     expect(label?.detail).toContain("40% of the run after Jev was lost");
     expect(label?.detail).toContain("6m 00s");
-    expect(label?.detail).toContain("(the held policy passed its maximum age)");
+    expect(label?.detail).toContain("(the policy in force passed its maximum age)");
     expect(label?.detail).toContain("not a completed Jev result");
     // Never the plain word Jev for a run that stopped governing.
     expect(label?.text).not.toBe("Jev");
@@ -457,8 +459,8 @@ describe("the provenance label names the state that actually happened", () => {
     expect(policyLabel("jev", waiting)?.text).toBe("Waiting for Jev");
     expect(policyLabel("jev", waiting)?.detail).toContain("the run was still waiting for its first policy");
 
-    // Ungoverned time that did not end the run is still named, never hidden.
-    const ungovened: PresentationPolicy = {
+    // Time that no policy covered stays in the record, never on the label.
+    const ungoverned: PresentationPolicy = {
       ...base,
       invalidMs: 120_000,
       liveMs: 480_000,
@@ -466,12 +468,13 @@ describe("the provenance label names the state that actually happened", () => {
       dropped: 3,
       clamped: 1,
     };
-    const ungovenedLabel = policyLabel("jev", ungovened);
-    expect(ungovenedLabel?.text).toBe("Jev · ungoverned time");
-    expect(ungovenedLabel?.detail).toContain("20% of the run had no Jev policy in force");
-    expect(ungovenedLabel?.detail).toContain("(the answer arrived after its request was superseded)");
-    expect(ungovenedLabel?.detail).toContain("3 answers below the confidence floor");
-    expect(ungovenedLabel?.detail).toContain("1 value clamped");
+    const ungovernedLabel = policyLabel("jev", ungoverned);
+    expect(ungovernedLabel?.text).toBe("Jev");
+    expect(ungovernedLabel?.detail).toContain("20 policies");
+    expect(ungovernedLabel?.detail).toContain("3 answers below the confidence floor");
+    expect(ungovernedLabel?.detail).toContain("1 value clamped");
+    // The record still accounts for it, exactly.
+    expect(ungovernedShare(ungoverned)).toBeCloseTo(0.2, 9);
   });
 
   it("has plain words for every cause it can classify, and none for an unknown one", () => {

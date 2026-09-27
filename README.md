@@ -49,22 +49,19 @@ No winner score is computed. Every number in the panel is a field of a real run.
 - **Bound and validated.** The policy is parsed against hard limits; anything malformed or
   out of range is rejected (or clamped and reported) and the previous policy stays.
 - **Applied even when imperfect, and reported.** The model's last accepted policy keeps
-  governing while no fresher one arrives: bounded by a maximum hold, clamped like any other,
-  and reported as *held* (`Jev · policy held`, with the share of the run it covered).
-  Answers that had to be clamped, or that fell below the confidence floor, are counted on
-  the label instead of disappearing into a neutral default.
+  governing while no fresher one arrives: bounded by a maximum hold, clamped like any other.
+  How much of the run was governed fresh, how much was held past its refresh window, and
+  whether any answer had to be clamped or fell below the confidence floor are all carried in
+  the run's own record (`heldMs`, the per-refresh outcomes and reasons), not on the label.
 - **No fabricated answers.** If Jev is unconfigured, has no answer yet, or has outlived even
-  the maximum hold of its last policy, the run continues on the Adaptive fallback and says so
-  **and why** in the classified reason on the label: a timeout, a rate limit, an upstream
-  error, an unreadable answer. A run that spent real time on the fallback is labelled
-  `Jev · fallback used` even for a small nonzero share; a run that never spent simulated
-  time under a live policy is labelled `Adaptive fallback`. Before the first provenance
-  snapshot, the UI says `Checking Jev`, never an unproven plain `Jev`.
+  the maximum hold of its last policy, the run stops and says so in plain words, with the
+  classified reason: a timeout, a rate limit, an upstream error, an unreadable answer. Before
+  the first provenance snapshot, the UI says `Checking Jev`, never an unproven plain `Jev`.
 
-The three Jev states are mutually exclusive and each is only ever shown for what actually
-happened: a held run is never called a fallback, a fallback is never hidden behind the plain
-word Jev, and no state is invented for a cause the classifier does not recognise. The
-benchmark artifact carries the same account (`heldMs`, `fallbackReason` in `provenance`).
+The controller the product shows is named `Jev`, unqualified. The accounting underneath that
+name stays in the run's own record — `heldMs`, `invalidMs`, `fallbackMs`, the refresh outcomes
+and reasons in `provenance` and telemetry — and a run that was not governed by Jev (never
+started, or lost mid-run) is never presented as a normal Jev run.
 
 ## Lifecycle
 
@@ -132,8 +129,8 @@ cp .env.example .env.local      # then fill in JEV_TOKEN (see below)
 pnpm dev                        # http://localhost:3000
 ```
 
-With no Jev configuration the app runs entirely on the Adaptive fallback and labels it that
-way: a complete demo with no credentials at all.
+With no Jev configuration there is no Jev run: the startup gate reports the reason in
+plain words, and nothing is simulated in its place.
 
 On Vercel, set `JEV_MODEL=typesafe-ai/jev`; the relay uses its request-scoped
 Vercel OIDC token for AI Gateway. For local runs outside Vercel, provide a valid
