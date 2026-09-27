@@ -20,15 +20,17 @@
   --text-value: 1.375rem; /* 22px — metric numerals */
   --text-display: clamp(2.125rem, 4.2vw, 2.75rem); /* landing statement */
 
-  /* Ink on warm paper. */
+  /* Ink on warm paper. The paper is the app's surround and the wash over the
+     landing; the surface is every floating panel. Both sit one step warmer than
+     the map's own land tone, so chrome reads as paper laid on a printed city. */
   --color-ink: #211d18;
   --color-ink-70: rgb(33 29 24 / 0.7);
   --color-ink-52: rgb(33 29 24 / 0.52);
   --color-ink-38: rgb(33 29 24 / 0.38);
   --color-hair: rgb(33 29 24 / 0.1);
   --color-hair-strong: rgb(33 29 24 / 0.2);
-  --color-surface: #fffdf9;
-  --color-paper: #f6f2ea;
+  --color-surface: #fffcf7;
+  --color-paper: #f4eee3;
 
   /* Shape: two radii; circles are reserved for the slider thumb and data dots. */
   --radius-control: 10px;
@@ -103,24 +105,24 @@ body {
 
 /** Text laid directly on the map gets a crisp halo, never a blur. */
 .on-map {
-  -webkit-text-stroke: 3px rgb(246 242 234 / 0.86);
+  -webkit-text-stroke: 3px rgb(244 238 227 / 0.86);
   paint-order: stroke fill;
 }
 
 /** Small type over the map: a soft warm shadow reads better than a stroke. */
 .on-map-soft {
   text-shadow:
-    0 1px 3px rgb(246 242 234 / 0.95),
-    0 0 1px rgb(246 242 234 / 0.9);
+    0 1px 3px rgb(244 238 227 / 0.95),
+    0 0 1px rgb(244 238 227 / 0.9);
 }
 
 /** Display type over the map: same idea, wider reach so it never fights roads. */
 .on-map-soft.on-map-display,
 .on-map-display {
   text-shadow:
-    0 2px 10px rgb(246 242 234 / 0.98),
-    0 1px 3px rgb(246 242 234 / 0.95),
-    0 0 1px rgb(246 242 234 / 0.9);
+    0 2px 10px rgb(244 238 227 / 0.98),
+    0 1px 3px rgb(244 238 227 / 0.95),
+    0 0 1px rgb(244 238 227 / 0.9);
 }
 
 /* ---------------------------------------------------------------- */
@@ -134,7 +136,7 @@ body {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: rgb(64 58 48 / 0.68);
-  -webkit-text-stroke: 2.5px rgb(246 242 234 / 0.92);
+  -webkit-text-stroke: 2.5px rgb(244 238 227 / 0.92);
   paint-order: stroke fill;
   white-space: nowrap;
   transition: opacity 240ms ease-out;

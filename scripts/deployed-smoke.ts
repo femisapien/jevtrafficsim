@@ -144,9 +144,9 @@ async function main(): Promise<void> {
   for (let waited = 0; waited < 24; waited += 1) {
     await new Promise((resolve) => setTimeout(resolve, 7_500));
     const body = await text();
-    // The first payoff is the trip-first summary. The full same-scenario table
-    // is deliberately collapsed behind See details in the current UI.
-    if (has(body, "Who got there first") && has(body, "Fixed") && has(body, "Adaptive")) {
+    // The payoff leads with one sentence and the three race rows; the full
+    // same-scenario table is deliberately collapsed behind See details.
+    if (has(body, "See details") && has(body, "Fixed") && has(body, "Adaptive")) {
       comparison = body;
       break;
     }

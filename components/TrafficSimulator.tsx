@@ -37,6 +37,7 @@ import {
   CLEAN_RUN_LOST_NOTICE,
   debugMode,
   discardNeedsConfirm,
+  reviewStateNeedsNoConfirm,
   shouldReaskBaselines,
   runStoppedMessage,
   runUnableMessage,
@@ -345,7 +346,15 @@ export function TrafficSimulator() {
           // are normally requested is a READY that belongs to the live run. A run
           // entered without onboarding (or via ?debug) never sees that READY, so
           // the request is (re)issued here when this scenario has not asked yet.
-          if (baselinesAskedRef.current?.fingerprint !== store.scenarioFingerprint) {
+          //
+          // Only the run the user ENTERED owes a payoff. A preview that finishes
+          // behind the menu earns none, and asking for its baselines would both
+          // spend a headless comparison and file the answer under the wrong
+          // scenario — the stale config from the last run the user played.
+          if (
+            store.entered &&
+            baselinesAskedRef.current?.fingerprint !== store.scenarioFingerprint
+          ) {
             const request: BaselinesCommand = {
               type: "BASELINES",
               tripId: store.config?.tripId ?? store.tripId,
@@ -501,19 +510,27 @@ export function TrafficSimulator() {
    * Run an action that would destroy the current run, or ask first.
    *
    * Setup changes before a run stay frictionless; the question is only ever
-   * asked when there is something real to lose (a run under way, or a result
-   * the user just earned). The pending action is kept in a ref and executed
+   * asked when there is something real to lose (a run under way). A run whose
+   * trip already arrived is not that: the payoff is on screen, and its two
+   * actions — play it again, or back to the menu — are deliberate there, so
+   * neither asks a second time. The pending action is kept in a ref and executed
    * only on the user's explicit acknowledgement.
    */
   const guardDiscard = useCallback((action: DiscardAction, run: () => void) => {
     const store = useUiStore.getState();
-    const needsConfirm = discardNeedsConfirm({
-      started:
-        (store.phase === "city" || store.phase === "entering") &&
-        (store.trip !== null || store.running),
+    const reviewed = reviewStateNeedsNoConfirm({
+      arrived: store.trip?.completed === true,
       runComplete: store.runComplete,
-      hasResult: store.liveResult !== null,
     });
+    const needsConfirm =
+      !reviewed &&
+      discardNeedsConfirm({
+        started:
+          (store.phase === "city" || store.phase === "entering") &&
+          (store.trip !== null || store.running),
+        runComplete: store.runComplete,
+        hasResult: store.liveResult !== null,
+      });
     if (!needsConfirm) {
       run();
       return;
@@ -680,15 +697,17 @@ export function TrafficSimulator() {
   const following = useUiStore((state) => state.following);
   const baselines = useUiStore((state) => state.baselines);
   const runComplete = useUiStore((state) => state.runComplete);
+  const entered = useUiStore((state) => state.entered);
   const scenarioFingerprint = useUiStore((state) => state.scenarioFingerprint);
 
   /**
    * Safety net for a lost baselines dispatch: the comparison is the whole
    * payoff, so if the run has finished and the scenario's baselines still are
-   * not here, ask once more (bounded — see shouldReaskBaselines).
+   * not here, ask once more (bounded — see shouldReaskBaselines). Only for the
+   * run the user entered: a preview owes no comparison.
    */
   useEffect(() => {
-    if (!runComplete) {
+    if (!runComplete || !entered) {
       return;
     }
     const asked = baselinesAskedRef.current;
@@ -707,7 +726,7 @@ export function TrafficSimulator() {
     baselinesReaskedRef.current = asked.fingerprint;
     useUiStore.getState().setBaselinesRunning(true);
     baselinesRef.current?.postMessage(asked.request);
-  }, [runComplete, baselines, scenarioFingerprint]);
+  }, [runComplete, baselines, scenarioFingerprint, entered]);
   const onFollow = useCallback(() => {
     mapHandleRef.current?.followEgo();
   }, []);

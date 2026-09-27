@@ -3,27 +3,29 @@
 /**
  * The payoff panel: a race first, an experiment underneath.
  *
- * A visitor wants one answer — who got there faster — so the top of this panel is
- * three trip times and one factual sentence. The statistical wall (waits,
+ * A visitor wants one answer — who got there faster — so the panel leads with
+ * one factual sentence and three trip times. The statistical wall (waits,
  * percentiles, throughput, queued-time share) lives behind SEE DETAILS, because
  * nobody should have to understand p95 to enjoy the result.
  *
  * The fairness guard is untouched and still authoritative: `comparisonVerdictAll`
- * decides whether these three results are a comparison at all, and a refusal for
- * a different world or a repeated controller still shows no table.
+ * decides whether these three results are a comparison at all.
  *
- * One refusal changed shape, by the owner's decision: a run that was changed by
- * hand keeps its numbers on screen, under a marker that says — in the run's own
- * words, and only when the run recorded them — what was changed and when, and
- * that the result is therefore not comparable. `alteredComparisonAllowed`
- * (the guard's own answer about the untouched counterfactual) is what permits it;
- * without it, the refusal stands exactly as it always has. The difference
- * sentence is not shown for an altered run: "faster than Adaptive" is a
- * comparison claim, and this panel is not allowed to make one here.
+ * A refusal keeps its numbers, in every shape it can honestly take:
+ *
+ *   - a run changed by hand (or a setting moved mid-run): shown under a marker
+ *     that says — in the run's own words, and only when the run recorded them —
+ *     what was changed and when. `alteredComparisonAllowed` permits it.
+ *   - baselines from ANOTHER scenario: also shown, under one short line saying
+ *     so, because a run and its numbers are real even when the baselines are
+ *     not the same experiment. No winner sentence either way: "faster than
+ *     Adaptive" is a comparison claim this panel is not allowed to make.
+ *   - anything else (a controller run twice): the run's own time and one line,
+ *     because there is no comparison to draw at all.
  *
  * No winner score, no claim that any controller is universally better: the
  * sentence reports the difference this run measured, in whichever direction it
- * went — and only where the run was left alone.
+ * went — and only where the three runs really are one experiment.
  */
 import { useState } from "react";
 import type { ChallengeResult } from "@/worker/challenge-result";
@@ -33,12 +35,29 @@ import type { BaselineState } from "@/store/ui-store";
 import {
   ALTERED_COMPARISON_FOOTER,
   COMPARISON_FOOTER,
+  DIFFERENT_SCENARIO_FOOTER,
+  DIFFERENT_SCENARIO_LINE,
+  DIFFERENT_SCENARIO_TITLE,
   alteredRunNotice,
+  baselinesFromAnotherScenario,
   comparisonRows,
   policyLabel,
   raceDelta,
   raceEntries,
 } from "./ui-model";
+
+/** The one marker both non-comparable shapes wear: what this is, and why. */
+function Marker({ title, line }: { title: string; line: string }) {
+  return (
+    <div role="note" className="rounded-control border border-hair-strong bg-ink/[0.035] px-3.5 py-3">
+      <p className="flex items-center gap-2 text-meta font-semibold text-ink">
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#b0392b]" aria-hidden="true" />
+        {title}
+      </p>
+      <p className="mt-1.5 text-meta leading-relaxed text-ink-70">{line}</p>
+    </div>
+  );
+}
 
 export function ComparisonPanel({
   baselines,
@@ -56,24 +75,28 @@ export function ComparisonPanel({
   /**
    * The owner's rule, decided by the guard itself: an altered run's numbers are
    * shown, marked. `alteredComparisonAllowed` only says yes when the alteration
-   * is the sole reason for the refusal, so every other refusal — a different
-   * world, the same controller twice — still renders no numbers at all.
+   * is the sole reason for the refusal.
    */
   const alteredNumbers = alteredComparisonAllowed(baselines.fixed, baselines.adaptive, live);
+  /** The baselines are another world's: the numbers are shown, marked. */
+  const otherScenario = baselinesFromAnotherScenario(baselines.fixed, baselines.adaptive, live);
   const visible = policyLabel(live.controller, policy);
   const liveLabel = live.controller === "jev"
     ? visible?.text ?? "Checking Jev"
     : `Watched ${visible?.text ?? live.controller}`;
 
-  if (!verdict.comparable && !alteredNumbers) {
+  /**
+   * A refusal with nothing to show: the run's own time, and one line saying why
+   * there is no comparison. Never a dead end — the user still leaves knowing
+   * what happened.
+   */
+  if (!verdict.comparable && !alteredNumbers && !otherScenario) {
     return (
-      <div>
+      <div data-jev-label={liveLabel}>
         <span className="label-micro">This run</span>
-        <p className="mt-2.5 text-ui leading-relaxed text-ink">
+        <p className="value-num mt-3 text-value leading-none text-ink">{formatLive(live)}</p>
+        <p className="mt-3 text-meta leading-relaxed text-ink-70">
           No comparison for this run: {verdict.reason}.
-        </p>
-        <p className="mt-1.5 text-meta leading-relaxed text-ink-70">
-          The trip still happened. Your time was {formatLive(live)}.
         </p>
       </div>
     );
@@ -84,48 +107,57 @@ export function ComparisonPanel({
   const completedTimes = entries.filter((entry) => !entry.incomplete).map((entry) => entry.tripTimeMs);
   const fastestTimeMs = completedTimes.length > 0 ? Math.min(...completedTimes) : null;
   const columns = ["Fixed", "Adaptive", liveLabel] as const;
+  /**
+   * Only three clean runs of one scenario have a race: the difference sentence,
+   * the fastest row's emphasis and the clean footer all belong to that shape
+   * alone. Everything else shows the same rows with this run leading them.
+   */
+  const race = verdict.comparable && !alteredNumbers && !otherScenario;
+  const markerTitle = otherScenario ? DIFFERENT_SCENARIO_TITLE : notice?.title ?? "";
+  const markerLine = otherScenario
+    ? DIFFERENT_SCENARIO_LINE
+    : `${notice?.detail ?? ""} ${notice?.boundary ?? ""}`.trim();
 
   return (
-    <div data-jev-provenance={policy === null ? undefined : JSON.stringify(policy)} data-jev-label={liveLabel} data-simulated-ms={live.simulatedMs} data-jev-altered={alteredNumbers ? "true" : undefined}>
-      <span className="label-micro">Who got there first</span>
-
-      {/* The honest marker, above the numbers it qualifies: what a human changed,
-          when, and the one thing these columns are not. */}
-      {alteredNumbers && notice !== null && (
-        <div
-          role="note"
-          className="mt-3 rounded-control border border-hair-strong bg-ink/[0.035] px-3 py-2.5"
-        >
-          <p className="flex items-center gap-1.5 text-meta font-semibold text-ink">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#b0392b]" aria-hidden="true" />
-            {notice.title}
-          </p>
-          <p className="mt-1 text-meta leading-relaxed text-ink-70">
-            {notice.detail} {notice.boundary}
-          </p>
-        </div>
+    <div
+      data-jev-provenance={policy === null ? undefined : JSON.stringify(policy)}
+      data-jev-label={liveLabel}
+      data-simulated-ms={live.simulatedMs}
+      data-jev-altered={alteredNumbers ? "true" : undefined}
+      data-jev-scenario={otherScenario ? "different" : undefined}
+    >
+      {/* One short status line, above the numbers it qualifies: the measured
+          difference when these three runs are one experiment, and the honest
+          limitation when they are not. */}
+      {race && delta !== null && (
+        <p className="text-ui leading-snug text-ink">{delta.text}</p>
       )}
+      {!race && markerTitle !== "" && <Marker title={markerTitle} line={markerLine} />}
 
-      <div className="mt-3 flex flex-col">
+      <div className="mt-3.5 flex flex-col">
         {entries.map((entry, index) => {
-          const fastest = !entry.incomplete && fastestTimeMs !== null && entry.tripTimeMs === fastestTimeMs;
+          const fastest =
+            !entry.incomplete && fastestTimeMs !== null && entry.tripTimeMs === fastestTimeMs;
+          // A race names the quickest run; anything else leads with the run the
+          // user actually watched, and keeps the baselines quiet underneath it.
+          const lead = race ? fastest : entry.live;
           return (
             <div
               key={entry.key}
-              className={`flex items-baseline justify-between gap-3 py-2 ${
+              className={`flex items-baseline justify-between gap-4 py-2.5 ${
                 index === 0 ? "" : "border-t border-hairline"
               }`}
             >
               <span
                 className={`text-meta uppercase tracking-wide ${
-                  fastest ? "font-semibold text-ink" : "font-medium text-ink-70"
+                  lead ? "font-semibold text-ink" : "font-medium text-ink-70"
                 }`}
               >
                 {entry.label}
               </span>
               <span
                 className={`value-num text-[26px] leading-none tracking-tight tabular-nums ${
-                  fastest ? "font-semibold text-ink" : "font-medium text-ink-70"
+                  lead ? "font-semibold text-ink" : "font-medium text-ink-70"
                 }`}
               >
                 {entry.incomplete ? "—" : entry.formatted}
@@ -135,16 +167,8 @@ export function ComparisonPanel({
         })}
       </div>
 
-      {/* No difference sentence for an altered run: naming a winner here would be
-          a comparison claim the run cannot support. The marker above already
-          says what the numbers are. */}
-      {delta !== null && !alteredNumbers && (
-        <p className="mt-3 border-t border-hairline pt-2.5 text-ui leading-snug text-ink">
-          {delta.text}
-        </p>
-      )}
       {visible?.detail !== null && visible !== null && (
-        <p className="mt-1.5 text-meta leading-relaxed text-ink-70">{visible.detail}</p>
+        <p className="mt-2.5 text-meta leading-relaxed text-ink-70">{visible.detail}</p>
       )}
 
       <button
@@ -157,13 +181,13 @@ export function ComparisonPanel({
       </button>
 
       {open && (
-        <div className="mt-3 border-t border-hairline pt-3">
+        <div className="mt-3.5 border-t border-hairline pt-3.5">
           <table className="w-full border-collapse">
             <thead>
               <tr>
-                <th className="w-[30%] pb-1.5 text-left label-micro"> </th>
+                <th className="w-[30%] pb-2 text-left label-micro"> </th>
                 {columns.map((column) => (
-                  <th key={column} className="pb-1.5 pl-2 text-right label-micro">
+                  <th key={column} className="pb-2 pl-2 text-right label-micro">
                     {column}
                   </th>
                 ))}
@@ -172,21 +196,27 @@ export function ComparisonPanel({
             <tbody>
               {rows.map((row) => (
                 <tr key={row.label} className="border-t border-hairline">
-                  <td className="py-1 text-meta text-ink-70">{row.label}</td>
-                  <td className="value-num py-1 pl-2 text-right text-meta text-ink">{row.fixed}</td>
-                  <td className="value-num py-1 pl-2 text-right text-meta text-ink">{row.adaptive}</td>
-                  <td className="value-num py-1 pl-2 text-right text-meta text-ink">{row.jev}</td>
+                  <td className="py-1.5 text-meta text-ink-70">{row.label}</td>
+                  <td className="value-num py-1.5 pl-2 text-right text-meta text-ink">{row.fixed}</td>
+                  <td className="value-num py-1.5 pl-2 text-right text-meta text-ink">{row.adaptive}</td>
+                  <td className="value-num py-1.5 pl-2 text-right text-meta text-ink">{row.jev}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <p className="mt-2.5 text-meta leading-relaxed text-ink-70">
-            {alteredNumbers ? ALTERED_COMPARISON_FOOTER : COMPARISON_FOOTER}
+          <p className="mt-3 text-meta leading-relaxed text-ink-70">
+            {race
+              ? COMPARISON_FOOTER
+              : otherScenario
+                ? DIFFERENT_SCENARIO_FOOTER
+                : ALTERED_COMPARISON_FOOTER}
           </p>
-          <p className="mt-1 text-micro leading-relaxed text-ink-38">
-            Scenario {live.fingerprint},{" "}
-            {baselines.incidentEntries} automatic{" "}
-            {baselines.incidentEntries === 1 ? "incident" : "incidents"}.
+          <p className="mt-1.5 text-micro leading-relaxed text-ink-38">
+            {otherScenario
+              ? `This run ${live.fingerprint} · baselines ${baselines.fingerprint}.`
+              : `Scenario ${live.fingerprint}, ${baselines.incidentEntries} automatic ${
+                  baselines.incidentEntries === 1 ? "incident" : "incidents"
+                }.`}
           </p>
         </div>
       )}
@@ -200,16 +230,14 @@ export function ComparisonPanel({
  * The wait after arrival is real work, not a stall: the run's window has to
  * close before the citywide rows can be read from it (see SimChrome's
  * ARRIVED_FINISHING_TEXT). This is the panel's own shape, in grey — the same
- * micro-label, the same three race rows (label left, time right), the same
- * sentence line and the same disclosure underneath — so the eye already knows
- * what is coming. The rows are the real rows' own classes at the real rows'
- * measured height (43.5/44.5 px, 44 px pitch), so each number lands exactly
- * where its bar was — the panel as a whole shifts up a little, because the
- * arrival copy above the rows is replaced by the shorter run-complete label.
+ * three race rows (label left, time right), the same sentence line and the same
+ * disclosure underneath — so the eye already knows what is coming. The rows are
+ * the real rows' own classes at the real rows' measured height, so each number
+ * lands where its bar was.
  *
  * Placeholders only: no spinner, no percentage, no invented progress. The whole
  * block is decorative (`aria-hidden`); the announcement lives in the chrome's
- * status region. `refusal` is the shape a refusal has — two sentences, not three
+ * status region. `refusal` is the shape a refusal has — two lines, not three
  * times — and it is also where an altered run's panel now opens: the marker's
  * title and paragraph sit in exactly that place before the rows arrive.
  */
@@ -238,14 +266,14 @@ export function ComparisonSkeleton({
             {[0, 1, 2].map((row) => (
               <div
                 key={row}
-                className={`flex items-baseline justify-between gap-3 py-2 ${
+                className={`flex items-baseline justify-between gap-4 py-2.5 ${
                   row === 0 ? "" : "border-t border-hairline"
                 }`}
               >
                 <Placeholder className="h-[11px] w-24" />
-                {/* 27.5px is the measured height of the real row's content:
-                    the 26px value's line box plus the baseline the label sits
-                    on, so the number lands exactly where its bar was. */}
+                {/* The measured height of the real row's content: the 26px
+                    value's line box plus the baseline the label sits on, so the
+                    number lands exactly where its bar was. */}
                 <Placeholder className="h-[27.5px] w-16" />
               </div>
             ))}

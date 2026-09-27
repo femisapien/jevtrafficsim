@@ -554,11 +554,9 @@ export const ALTERED_RUN_TITLE = "Altered by hand";
 export const ALTERED_SCENARIO_TITLE = "Scenario changed mid-run";
 /** The run's own record of an intervention, or the count when only that exists. */
 export const ALTERED_INTERVENTIONS_LEAD = "Fired during this run: ";
-export const ALTERED_SCENARIO_LINE =
-  "A setting changed while this run was playing.";
+export const ALTERED_SCENARIO_LINE = "A setting changed mid-run.";
 export const ALTERED_RUN_BOUNDARY =
-  "Fixed and Adaptive replayed the scenario without those changes, so the numbers " +
-  "below are not comparable.";
+  "Fixed and Adaptive ran the clean scenario, so the numbers below are not comparable.";
 /** The comparison's footer, in the two shapes the panel can honestly take. */
 export const COMPARISON_FOOTER =
   "Same scenario, same demand, same incidents, same driver. Only the signals differ.";
@@ -606,6 +604,50 @@ export function alteredRunNotice(live: ChallengeResult): AlteredRunNotice | null
     detail: lines.join(" "),
     boundary: ALTERED_RUN_BOUNDARY,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Runs of another scenario (the numbers are still shown)              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Whether the baselines describe a different world than the live run.
+ *
+ * The guard's refusal stands — three results of two scenarios are not a
+ * comparison — and this only decides how that refusal LOOKS: the numbers are
+ * real and still worth showing, so the panel shows them under one short line
+ * saying what they are not. Read from the results' own fingerprints, never from
+ * a reason string, so it cannot describe a state the runs are not in.
+ */
+export function baselinesFromAnotherScenario(
+  fixed: ChallengeResult,
+  adaptive: ChallengeResult,
+  live: ChallengeResult,
+): boolean {
+  return fixed.fingerprint !== live.fingerprint || adaptive.fingerprint !== live.fingerprint;
+}
+
+/** The marker a run of another scenario is shown under. */
+export const DIFFERENT_SCENARIO_TITLE = "Different scenario";
+export const DIFFERENT_SCENARIO_LINE =
+  "Fixed and Adaptive ran a different scenario. These times are not directly comparable.";
+/** The details footer for that shape: the clean run's claim would be false here. */
+export const DIFFERENT_SCENARIO_FOOTER =
+  "This run and the Fixed and Adaptive runs played different scenarios.";
+
+/**
+ * The review state: the trip arrived, and the payoff is on screen.
+ *
+ * The payoff's two actions are "play this run again" and "back to the menu", and
+ * both are deliberate there — asking again turns one decision into two. While a
+ * run is still in flight the guard keeps asking, because then the action really
+ * does throw away something the user has not seen yet.
+ */
+export function reviewStateNeedsNoConfirm(input: {
+  readonly arrived: boolean;
+  readonly runComplete: boolean;
+}): boolean {
+  return input.arrived || input.runComplete;
 }
 
 /* ------------------------------------------------------------------ */
@@ -698,8 +740,7 @@ export function baselinePanelState(input: {
  */
 export const BASELINE_COMPUTING_TEXT = "Running the same scenario with Fixed and Adaptive…";
 export const BASELINE_FAILED_TEXT = "The Fixed and Adaptive runs could not be computed.";
-export const BASELINE_FAILED_DETAIL =
-  "The comparison needs both runs. Trying again is safe.";
+export const BASELINE_FAILED_DETAIL = "The comparison needs both runs.";
 export const BASELINE_RETRY_LABEL = "Try again";
 
 /** Actions that throw the current run away. */
@@ -733,9 +774,9 @@ export function discardCopy(action: DiscardAction): DiscardCopy {
       };
     case "new-scenario":
       return {
-        title: "Start a new scenario?",
-        body: "This discards the run in progress and draws a new scenario of the same trip.",
-        confirm: "New draw",
+        title: "Leave this run?",
+        body: "The run in progress is discarded, and the menu opens.",
+        confirm: "Leave run",
       };
     case "restart":
       return {

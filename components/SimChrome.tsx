@@ -73,14 +73,13 @@ const EASE = [0.22, 1, 0.36, 1] as const;
  * not: the comparison's citywide rows can only be read from a run that covers
  * the same window as the Fixed and Adaptive baselines, so the rest of that
  * window is simulated before the table can be printed. The copy says exactly
- * that. It never says "still playing" (the car is parked) and never claims the
- * run is complete (it is not, and "Run complete" stays conditional on
- * RUN_COMPLETE). The skeleton underneath shows the comparison's shape while the
- * numbers are being prepared.
+ * that: one state line, one fact, and the skeleton underneath showing the
+ * comparison's shape. It never says "still playing" (the car is parked) and
+ * never claims the run is complete (it is not, and "Run complete" stays
+ * conditional on RUN_COMPLETE).
  */
 export const ARRIVED_FINISHING_TEXT = "You arrived. Finishing the citywide comparison…";
-export const ARRIVED_FINISHING_DETAIL =
-  "The citywide numbers come from the same window as the Fixed and Adaptive runs, and that window is still finishing. Your trip time is final.";
+export const ARRIVED_FINISHING_DETAIL = "Your trip time is final.";
 /** What a screen reader hears while either wait is on screen. */
 export const COMPARISON_PREPARING_ANNOUNCEMENT = "Preparing the citywide comparison.";
 
@@ -99,7 +98,7 @@ function IconButton({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className="flex h-[32px] w-[32px] items-center justify-center rounded-[6px] text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink active:scale-[0.96]"
+      className="flex h-9 w-9 items-center justify-center rounded-[7px] text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink active:scale-[0.96]"
     >
       {children}
     </button>
@@ -277,10 +276,11 @@ export function SimChrome(props: SimChromeProps) {
   const manualIncidents = useUiStore((state) => state.manualIncidents);
   const surgeFlash = useUiStore((state) => state.surgeFlash);
   const surgeVisible = useUiStore((state) => state.surgeVisible);
-  // "Live" means the city is the surface the user is looking at. A completed run
-  // always is: the payoff panel is the whole point of finishing, and a run entered
-  // without onboarding (or through ?debug) never flips the phase on its own.
-  const live = phase === "city" || runComplete;
+  // "Live" means the city is the surface the user is looking at: the run they
+  // entered, or the payoff it earned. A preview playing behind the menu is
+  // neither — its own completion must not throw a result over the setup screen.
+  const entered = useUiStore((state) => state.entered);
+  const live = phase === "city" || (runComplete && entered);
   /**
    * The payoff opens when the TRIP is over, and only hands over to the
    * comparison when the RUN's window is final. The two are not the same moment:
@@ -320,7 +320,7 @@ export function SimChrome(props: SimChromeProps) {
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.34, delay: 0.06, ease: EASE }}
           >
-            <div className="surface flex w-fit max-w-full items-center gap-[3px] overflow-x-auto p-[3px]">
+            <div className="surface flex w-fit max-w-full items-center gap-1 overflow-x-auto p-1">
               {/*
                 The visible run is Jev. Choosing another controller by hand is a
                 developer control, so the picker only exists behind ?debug — a
@@ -336,7 +336,7 @@ export function SimChrome(props: SimChromeProps) {
                     height={30}
                     ariaLabel="Controller"
                   />
-                  <span className="mx-[3px] h-4 w-px bg-hair" aria-hidden="true" />
+                  <span className="mx-[3px] h-[18px] w-px bg-hair" aria-hidden="true" />
                 </>
               )}
               <IconButton
@@ -353,14 +353,14 @@ export function SimChrome(props: SimChromeProps) {
                   </svg>
                 )}
               </IconButton>
-              <span className="mx-[3px] h-4 w-px bg-hair" aria-hidden="true" />
+              <span className="mx-[3px] h-[18px] w-px bg-hair" aria-hidden="true" />
               <button
                 type="button"
                 onClick={props.onFollow}
                 aria-pressed={props.following}
                 aria-label={props.following ? "Following the car" : "Recenter on the car"}
                 title={props.following ? "Following the car" : "Recenter on the car"}
-                className={`flex h-[32px] items-center gap-[6px] rounded-[6px] px-2.5 text-meta font-medium transition-colors duration-150 ${
+                className={`flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 ${
                   props.following ? "text-ink-70 hover:bg-ink/[0.05] hover:text-ink" : "bg-ink/[0.06] text-ink"
                 }`}
               >
@@ -373,7 +373,7 @@ export function SimChrome(props: SimChromeProps) {
               {/* Zoom is a pointer affordance: on touch the map pinches, and the
                   row has to fit 390px with the debug controller picker in it
                   (measured: it pushed Scenario off-screen when always shown). */}
-              <span className="mx-[3px] hidden h-4 w-px bg-hair sm:block" aria-hidden="true" />
+              <span className="mx-[3px] hidden h-[18px] w-px bg-hair sm:block" aria-hidden="true" />
               <span className="hidden items-center gap-[3px] sm:flex">
                 <IconButton label="Zoom out" onClick={props.onZoomOut}>
                   <svg {...glyph}>
@@ -386,13 +386,13 @@ export function SimChrome(props: SimChromeProps) {
                   </svg>
                 </IconButton>
               </span>
-              <span className="mx-[3px] h-4 w-px bg-hair" aria-hidden="true" />
+              <span className="mx-[3px] h-[18px] w-px bg-hair" aria-hidden="true" />
               <button
                 type="button"
                 onClick={() => setScenarioOpen(!scenarioOpen)}
                 aria-expanded={scenarioOpen}
                 aria-label="Scenario"
-                className={`flex h-[32px] items-center gap-[6px] rounded-[6px] px-2.5 text-meta font-medium transition-colors duration-150 ${
+                className={`flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 ${
                   scenarioOpen ? "bg-ink/[0.06] text-ink" : "text-ink-70 hover:bg-ink/[0.05] hover:text-ink"
                 } focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ink/25`}
               >
@@ -437,22 +437,24 @@ export function SimChrome(props: SimChromeProps) {
         )}
       </AnimatePresence>
 
-      {/* Bottom-centre: the payoff IS the comparison, then the error state. */}
+      {/* The payoff IS the comparison, then the error state. */}
       <AnimatePresence>
         {live && finished && (
           <motion.div
             key="complete"
-            className="surface-overlay absolute left-1/2 top-1/2 z-20 max-h-[calc(100vh-48px)] w-[520px] max-w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto p-5 sm:p-6"
+            className="surface-overlay absolute left-1/2 top-1/2 z-20 max-h-[calc(100vh-48px)] w-[520px] max-w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto p-6 sm:p-7"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
             transition={{ duration: 0.28, ease: EASE }}
           >
-            {/* The run's own window only closes at RUN_COMPLETE; before that the
-                panel is up because the TRIP ended, and claiming the run is
-                complete would be false. */}
-            {runComplete && <span className="label-micro">Run complete</span>}
-            <div className="mt-3.5">
+            {/* One heading for the whole payoff: the run's own window only closes
+                at RUN_COMPLETE, and before that the panel is up because the TRIP
+                ended, so claiming the run is complete would be false. */}
+            {runComplete && (
+              <h2 className="text-ui font-semibold tracking-[-0.01em] text-ink">Run complete</h2>
+            )}
+            <div className={runComplete ? "mt-4" : ""}>
               {panel === "comparison" && liveResult !== null && baselines !== null ? (
                 <ComparisonPanel baselines={baselines} live={liveResult} policy={policy} />
               ) : null}
@@ -463,17 +465,17 @@ export function SimChrome(props: SimChromeProps) {
                 </div>
               )}
               {panel === "failed" && (
-                <div role="alert" className="flex flex-col items-start gap-3">
+                <div role="alert" className="flex flex-col items-start gap-4">
                   <div>
                     <p className="text-ui font-medium text-ink">{BASELINE_FAILED_TEXT}</p>
-                    <p className="mt-1.5 text-meta leading-relaxed text-ink-70">
+                    <p className="mt-2 text-meta leading-relaxed text-ink-70">
                       {baselinesFailed ?? BASELINE_FAILED_DETAIL}
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={props.onRetryBaselines}
-                    className="h-9 rounded-control border border-hair-strong px-3.5 text-meta font-medium text-ink transition-colors duration-150 hover:bg-ink/[0.04] active:scale-[0.99]"
+                    className="h-10 rounded-control border border-hair-strong px-4 text-meta font-medium text-ink transition-colors duration-150 hover:bg-ink/[0.04] active:scale-[0.99]"
                   >
                     {BASELINE_RETRY_LABEL}
                   </button>
@@ -486,7 +488,7 @@ export function SimChrome(props: SimChromeProps) {
               {panel === "waiting" && (
                 <div role="status" aria-live="polite">
                   <p className="text-ui font-medium text-ink">{ARRIVED_FINISHING_TEXT}</p>
-                  <p className="mt-1.5 text-meta leading-relaxed text-ink-70">
+                  <p className="mt-2 text-meta leading-relaxed text-ink-70">
                     {ARRIVED_FINISHING_DETAIL}
                   </p>
                   <p className="sr-only">{COMPARISON_PREPARING_ANNOUNCEMENT}</p>
@@ -498,20 +500,23 @@ export function SimChrome(props: SimChromeProps) {
                 <ComparisonSkeleton variant={skeleton} />
               )}
             </div>
-            <div className="mt-5 flex gap-2.5">
+            {/* Two actions, and only two: play this run again, or go back to the
+                menu and choose another. A finished run has nothing left to ask
+                about, so neither one asks again. */}
+            <div className="mt-6 flex gap-3">
               <button
                 type="button"
                 onClick={props.onRestart}
-                className="h-10 flex-1 rounded-control bg-ink text-ui font-medium text-surface transition-opacity duration-150 hover:opacity-90 active:scale-[0.99]"
+                className="h-11 flex-1 rounded-control bg-ink text-ui font-medium text-surface transition-opacity duration-150 hover:opacity-90 active:scale-[0.99]"
               >
                 Restart
               </button>
               <button
                 type="button"
                 onClick={props.onNewScenario}
-                className="h-10 flex-1 rounded-control border border-hair-strong text-ui font-medium text-ink transition-colors duration-150 hover:bg-ink/[0.04] active:scale-[0.99]"
+                className="h-11 flex-1 rounded-control border border-hair-strong text-ui font-medium text-ink transition-colors duration-150 hover:bg-ink/[0.04] active:scale-[0.99]"
               >
-                New draw
+                Menu
               </button>
             </div>
           </motion.div>

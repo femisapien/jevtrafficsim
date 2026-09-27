@@ -46,7 +46,9 @@ async function journey(page: Page, relayStatus: 200 | 503) {
     return current ? Math.hypot(current.x - (window as Window & { __firstEgo?: { x: number; y: number } }).__firstEgo!.x,
       current.y - (window as Window & { __firstEgo?: { x: number; y: number } }).__firstEgo!.y) : 0;
   }), { timeout: 30_000 }).toBeGreaterThan(0.1);
-  await expect(page.getByText("Who got there first")).toBeVisible({ timeout: 100_000 });
+  // The comparison panel itself is the signal: it renders once the run's window
+  // has closed and its baselines are in (the heading alone only says "complete").
+  await expect(page.locator("[data-jev-label]")).toBeVisible({ timeout: 100_000 });
   // The arrival keeps the street framing. Pulling the camera back to a
   // city-wide view on completion was tried and removed: the result belongs over
   // the car, not over a mostly-empty lake (measured 13.6 before, 15.4 now).
@@ -114,8 +116,8 @@ test("a relay that cannot answer starts NO run: no Jev result is produced", asyn
   // substituted for Jev, and the reason is shown in plain words.
   await expect(page.getByText(/This run did not start/)).toBeVisible({ timeout: 30_000 });
   // No payoff, no comparison, no provenance panel: this run produced no result.
-  await expect(page.getByText("Who got there first")).toBeHidden();
-  await expect(page.locator("[data-jev-provenance]")).toBeHidden();
+  await expect(page.locator("[data-jev-label]")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Run complete" })).toBeHidden();
   const telemetry = await page.evaluate(() =>
     (window as Window & { __jevDebug?: { telemetry?: unknown } }).__jevDebug?.telemetry ?? null,
   );
@@ -158,7 +160,9 @@ test("mobile trip HUD and incident controls stay inside the viewport", async ({ 
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   expect(liveOverflow).toBeLessThanOrEqual(0);
-  await expect(page.getByText("Who got there first")).toBeVisible({ timeout: 100_000 });
+  // The comparison panel itself is the signal: it renders once the run's window
+  // has closed and its baselines are in (the heading alone only says "complete").
+  await expect(page.locator("[data-jev-label]")).toBeVisible({ timeout: 100_000 });
   // The arrival keeps the street framing. Pulling the camera back to a
   // city-wide view on completion was tried and removed: the result belongs over
   // the car, not over a mostly-empty lake (measured 13.6 before, 15.4 now).

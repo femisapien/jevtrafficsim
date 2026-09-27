@@ -222,9 +222,9 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
       animate={{ opacity: live ? 1 : 0, y: live ? 0 : 8 }}
       transition={{ duration: 0.32, delay: live ? 0.12 : 0, ease: [0.22, 1, 0.36, 1] }}
     >
-      <div className="surface pointer-events-auto flex w-full max-w-full flex-col p-[3px] sm:w-auto">
+      <div className="surface pointer-events-auto flex w-full max-w-full flex-col p-1 sm:w-auto">
         <div
-          className="grid h-[22px] items-center px-2 text-meta font-medium text-ink-70"
+          className="grid h-6 items-center px-2.5 text-meta font-medium text-ink-70"
           aria-live="polite"
         >
           <AnimatePresence mode="wait">
@@ -243,7 +243,7 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
           </AnimatePresence>
         </div>
         {pending === null ? (
-          <div className="grid grid-cols-3 items-center gap-[2px] sm:flex">
+          <div className="grid grid-cols-3 items-center gap-1 sm:flex sm:gap-1.5">
             {INCIDENTS.map((option) => {
               const availability = incidentAvailability(option.kind, capabilities);
               const Icon = option.icon;
@@ -274,7 +274,7 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
                     onMouseLeave={() => setHint((current) => (current === option.hint ? null : current))}
                     onFocus={() => setHint(unavailableHint ?? option.hint)}
                     onBlur={() => setHint((current) => (current === option.hint ? null : current))}
-                  className={`flex h-9 w-full items-center justify-center gap-1 whitespace-nowrap rounded-[6px] px-1 text-meta font-medium transition-colors duration-150 sm:w-auto sm:gap-[6px] sm:px-2.5 ${
+                  className={`flex h-9 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-1.5 text-meta font-medium transition-colors duration-150 sm:w-auto sm:px-3 ${
                       isArmed
                         ? "bg-ink text-surface"
                         : availability.applicable

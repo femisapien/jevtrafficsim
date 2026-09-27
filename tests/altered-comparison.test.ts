@@ -253,20 +253,36 @@ function source(file: string): string {
 describe("the panel shows an altered run's numbers under the marker", () => {
   const panel = source("components/ComparisonPanel.tsx");
 
-  it("keeps the plain refusal for every other refusal", () => {
+  it("keeps a refusal with nothing to show down to one line and one number", () => {
     expect(panel).toContain("No comparison for this run: {verdict.reason}.");
-    expect(panel).toContain("if (!verdict.comparable && !alteredNumbers) {");
+    expect(panel).toContain("if (!verdict.comparable && !alteredNumbers && !otherScenario) {");
+    // No reassurance above the numbers: the run's own time is the useful part.
+    expect(panel).not.toContain("The trip still happened");
   });
 
   it("renders the marker above the rows, and drops the winner sentence", () => {
     expect(panel).toContain("data-jev-altered");
     expect(panel).toContain("alteredRunNotice(live)");
-    expect(panel).toContain("{notice.detail} {notice.boundary}");
+    // Both halves of the notice reach the marker that qualifies the numbers.
+    expect(panel).toContain("notice?.title");
+    expect(panel).toContain("notice?.detail");
+    expect(panel).toContain("notice?.boundary");
     // "faster than Adaptive" is a comparison claim: not for an altered run.
-    expect(panel).toContain("{delta !== null && !alteredNumbers && (");
+    expect(panel).toContain("{race && delta !== null && (");
+  });
+
+  it("shows another scenario's baselines too, under their own marker", () => {
+    // The owner's rule: a refusal keeps its numbers in every shape it can
+    // honestly take, and the shape is decided from the fingerprints themselves.
+    expect(panel).toContain("baselinesFromAnotherScenario(");
+    expect(panel).toContain("DIFFERENT_SCENARIO_TITLE");
+    expect(panel).toContain("DIFFERENT_SCENARIO_LINE");
+    expect(panel).toContain('data-jev-scenario={otherScenario ? "different" : undefined}');
   });
 
   it("switches the details footer instead of repeating the clean claim", () => {
-    expect(panel).toContain("{alteredNumbers ? ALTERED_COMPARISON_FOOTER : COMPARISON_FOOTER}");
+    expect(panel).toContain("? COMPARISON_FOOTER");
+    expect(panel).toContain(": otherScenario");
+    expect(panel).toContain(": ALTERED_COMPARISON_FOOTER}");
   });
 });

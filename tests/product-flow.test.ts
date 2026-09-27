@@ -65,9 +65,9 @@ function source(file: string): string {
 /* ------------------------------------------------- 1. the public setup --- */
 
 describe("the public setup", () => {
-  it("asks four questions: trip, traffic, driver, new draw", () => {
+  it("asks three questions and one redraw: trip, traffic, driver, new scenario", () => {
     const onboarding = source("components/Onboarding.tsx");
-    for (const field of ["Trip", "Traffic", "Driver", "New draw"]) {
+    for (const field of ["Trip", "Traffic", "Driver", "New scenario"]) {
       expect(onboarding).toContain(field);
     }
     // Inside the component, the seed and the controller render only after the
@@ -97,9 +97,11 @@ describe("the public setup", () => {
     expect(chrome.indexOf("CONTROLLER_OPTIONS", chromeDebug)).toBeGreaterThan(chromeDebug);
     // The live scenario popover keeps its seed field behind the debug prop too.
     expect(chrome).toContain("{debug && (\n          <SeedField");
-    // The old wording promised a new city when the geography never changes.
+    // The old wording promised a new city when the geography never changes; the
+    // payoff's way back to the setup screen is a word everyone already knows.
     expect(chrome).not.toContain("New city");
-    expect(chrome).toContain("New draw");
+    expect(chrome).not.toContain("New draw");
+    expect(chrome).toMatch(/>\s*Menu\s*</);
     // The old Fixed-vs-Adaptive-only label is gone from the payoff panel.
     expect(source("components/ComparisonPanel.tsx")).not.toContain("Fixed vs Adaptive");
   });

@@ -257,7 +257,7 @@ export function Onboarding({
                   onClick={newScenario}
                   className="text-meta text-ink-70 transition-colors duration-150 hover:text-ink"
                 >
-                  New draw
+                  New scenario
                 </button>
               </motion.div>
 

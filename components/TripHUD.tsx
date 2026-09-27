@@ -72,21 +72,22 @@ export function TripHUD() {
       exit={{ opacity: 0, y: 6 }}
       transition={{ duration: 0.32, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}
     >
-      <div className="surface flex flex-col gap-2.5 px-3.5 py-3" role="status" aria-label="Trip">
-        {/* Identity + state on one line, so the trip name gets the full width
-            underneath instead of being cut to "Soldier Field → Nav…". */}
+      <div className="surface flex flex-col px-4 py-3.5" role="status" aria-label="Trip">
+        {/* Identity: the panel's own name, the trip, and its state. */}
         <div className="flex items-baseline justify-between gap-3">
           <span className="label-micro">Jev Traffic · Chicago</span>
           <span
             className={`label-micro shrink-0 ${view?.completed ? "text-ink" : "text-ink-70"}`}
           >
-            {view?.state.toUpperCase() ?? "—"}
+            {view?.state ?? "—"}
           </span>
         </div>
-        <span className="min-w-0 truncate text-ui font-medium text-ink">
+        <span className="mt-1.5 min-w-0 truncate text-ui font-medium text-ink">
           {view?.tripName ?? "Trip"}
         </span>
-        <div className="flex items-baseline justify-between gap-3">
+        {/* One context line: how busy the city is, who is driving, and who is
+            running the signals (the label carries its own detail on hover). */}
+        <div className="mt-3 flex items-baseline justify-between gap-3">
           <span className="text-meta leading-tight text-ink-70">
             {trafficLabel(trafficLevel)} · {driverLabel(driver)}
           </span>
@@ -97,7 +98,9 @@ export function TripHUD() {
             {provenance?.text ?? controller}
           </span>
         </div>
-        <div className="flex flex-col gap-2">
+        {/* The three facts of the race, under one rule so they read as one
+            block rather than as more lines of the header. */}
+        <div className="mt-3.5 flex flex-col gap-2.5 border-t border-hairline pt-3.5">
           {view ? (
             view.rows
               .filter((row) => debug || PRIMARY_ROWS.includes(row.label))
@@ -112,7 +115,9 @@ export function TripHUD() {
           )}
         </div>
         {runShowsNonComparable({ modified, manualIncidents }) && (
-          <span className="text-meta leading-none text-ink-70">modified · not comparable</span>
+          <span className="mt-3 border-t border-hairline pt-2.5 text-meta leading-none text-ink-70">
+            modified · not comparable
+          </span>
         )}
         {debug && (
           <div className="mt-0.5 border-t border-hair pt-2">

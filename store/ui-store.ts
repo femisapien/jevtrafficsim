@@ -64,6 +64,13 @@ export interface UiState {
   debug: boolean;
   seed: number;
   ready: boolean;
+  /**
+   * The run on screen is one the user ENTERED (a READY that was applied, not a
+   * landing/menu preview). The payoff belongs to that run and to no other: a
+   * preview that finishes behind the menu must not throw its result over the
+   * setup screen.
+   */
+  entered: boolean;
   running: boolean;
   runComplete: boolean;
   /** Fingerprint of the world whose run finished; null until one has. */
@@ -191,6 +198,7 @@ export const useUiStore = create<UiState>()((set) => ({
   debug: false,
   seed: 42,
   ready: false,
+  entered: false,
   running: false,
   runComplete: false,
   completedFingerprint: null,
@@ -210,8 +218,12 @@ export const useUiStore = create<UiState>()((set) => ({
   setPhase: (phase) =>
     set({
       phase,
-      // Leaving the city puts the camera back in play for the next run.
-      ...(phase === "config" || phase === "landing" ? { cameraFramedFor: null } : {}),
+      // Leaving the city puts the camera back in play for the next run, and
+      // ends the run the user entered: what plays behind the menu is a preview,
+      // and a preview owes nobody a payoff.
+      ...(phase === "config" || phase === "landing"
+        ? { cameraFramedFor: null, entered: false }
+        : {}),
     }),
   setTrafficLevel: (trafficLevel) => set({ trafficLevel }),
   setTripId: (tripId) => set({ tripId }),
@@ -241,6 +253,9 @@ export const useUiStore = create<UiState>()((set) => ({
       tripId: config.tripId,
       scaleLabel,
       ready: true,
+      // This READY was applied, not swallowed as a preview: the run on screen is
+      // the one the user entered, and it is the only one that earns a payoff.
+      entered: true,
       error: null,
       /**
        * A READY that describes the SAME scenario as the run that just finished
