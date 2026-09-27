@@ -3,7 +3,7 @@
 /**
  * Onboarding (Task 11 polish pass; Issue #15 made it the PUBLIC flow).
  *
- * Screen 1 — the title, one line and a single Start action, left-aligned over
+ * Screen 1 — the title, one line and a single Start action, centered over
  * the city seen whole (the map is the hero, not a blurred backdrop).
  * Screen 2 — the experiment's inputs and nothing else: which Chicago trip, how
  * much traffic, who is driving, and a fresh scenario. The controller is not a
@@ -106,7 +106,7 @@ export function Onboarding({
   const configuring = phase === "config" || phase === "entering";
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-start px-6 sm:px-10">
+    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center px-6 sm:px-10">
       <AnimatePresence mode="wait">
         {phase === "landing" && (
           <motion.div
