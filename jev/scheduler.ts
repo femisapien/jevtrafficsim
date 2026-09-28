@@ -16,10 +16,11 @@
  *   successful refresh at all.
  *
  * Our own two layers never fired: the Vercel Firewall rule (60 requests/60 s
- * per IP) and the instance-local limiter (180/60 s per instance per IP) were
- * used at 40% and 13% of their allowances and rejected nothing. Raising either
- * would not have changed a single one of those 19 rejections, which is why this
- * module schedules around the UPSTREAM allowance instead of spending it faster.
+ * per IP) and the instance-local limiter (then 180/60 s per instance per IP,
+ * since re-sized to 10/60 s by the security pass) were used at 40% and 13% of
+ * their allowances and rejected nothing. Raising either would not have changed
+ * a single one of those 19 rejections, which is why this module schedules
+ * around the UPSTREAM allowance instead of spending it faster.
  *
  * ## What the upstream actually tells us, from the raw responses
  *

@@ -55,20 +55,24 @@
  *
  * | guard | scope | guarantee |
  * |---|---|---|
- * | platform rate limit (Vercel Firewall) | deployment-wide | real, when a rule exists — configured by id, see below |
+ * | platform rate limit (Vercel Firewall) | deployment-wide | real when a rule resolves; when the id is configured and the rule does NOT resolve, the request is REFUSED (fail closed — firewall.ts) |
  * | first-party check | per request | a browser on another site cannot use our quota |
  * | in-memory budget | ONE serverless instance | bounds a runaway caller on that instance; it is NOT a global limit |
- * | strict schema + body ceiling | per request | zero upstream calls for anything malformed |
+ * | strict schema + body ceiling | per request | zero upstream calls for anything malformed, and the body is bounded WHILE it is read, not after (body.ts) |
  * | bounded question set | by construction | the route can never become a general model proxy |
  *
  * The in-memory counter is the last guard, not the wall: serverless instances
  * are created and destroyed on demand, so a caller spread across many of them
  * gets a budget per instance. The deployment-wide control is the platform's own
- * (`JEV_RATE_LIMIT_ID` → `@vercel/firewall`), which is inert until a matching
- * rate-limit rule is created in the Vercel Firewall — that step is a dashboard
- * action, and it is the one thing this repository cannot do for itself.
+ * (`JEV_RATE_LIMIT_ID` → `@vercel/firewall`), which needs a matching
+ * rate-limit rule created in the Vercel Firewall — a dashboard action, and the
+ * one thing this repository cannot do for itself. Because that guard is the
+ * only deployment-wide bound there is, this route FAILS CLOSED on it in
+ * production: with the id configured and the platform not resolving the rule
+ * (or the lookup failing), policy requests are refused 503 rather than served
+ * unbounded. Unset `JEV_RATE_LIMIT_ID` to run without the platform guard —
+ * that is the explicit, documented choice, and the local-development path.
  */
-import { unstable_checkRateLimit as checkRateLimit } from "@vercel/firewall";
 import { getVercelOidcTokenSync } from "@vercel/oidc";
 import {
   createHttpJevClient,
@@ -90,6 +94,8 @@ import { createTypesafeJevClient, JEV_TYPESAFE_TIMEOUT_MS } from "@/jev/typesafe
 import { jevPolicyContext } from "@/jev/request";
 import { JEV_LIMITS, parseJevPolicy, validateJevPolicyRequest } from "@/jev/schema";
 import { callerIdentity } from "./caller";
+import { readBoundedBody } from "./body";
+import { platformGuardVerdict } from "./firewall";
 
 /**
  * Ceiling for one request body. The size was measured against the production
@@ -100,16 +106,32 @@ import { callerIdentity } from "./caller";
 const MAX_BODY_BYTES = JEV_LIMITS.REQUEST_BODY_BYTES;
 
 /**
- * Instance-local abuse budget (Issue #15, corrected in Issue #37).
+ * Instance-local abuse budget (Issue #15, corrected in Issue #37, re-sized in
+ * the security pass).
  *
  * HONEST SCOPE: this counter lives in one serverless instance's memory. It
  * bounds a runaway caller that keeps hitting the same instance; it does NOT
  * bound a caller spread across instances, and it must never be described as the
  * endpoint's global limit. The deployment-wide control is the platform's own
- * rate limiter (see `platformRateLimited`), and the durable bound on cost is the
+ * rate limiter (see firewall.ts), and the durable bound on cost is the
  * contract: only the Jev question set is ever forwarded (see jev/gateway.ts), so
  * this route cannot become a general completion endpoint whatever the caller
  * sends.
+ *
+ * WHY 10, from measurements rather than taste. The real client is a browser
+ * session whose scheduler spends at most 4 requests per trailing 60 s
+ * (`JEV_SERVICE_BUDGET`: 5 advertised, 80% safety share, 15 s spacing) because
+ * that is what the upstream allowance sustains. The old 180/60 s was 45x that:
+ * it bounded nothing an honest client could ever reach, and it left a runaway
+ * client free to spend ~45x a legitimate session's demand from one instance
+ * before anything refused. 10/60 s is 2.5x one session's measured cadence —
+ * headroom for the case the product actually has (a visitor with a second tab
+ * open: 2 x 4 = 8 requests/min from one address, which still fits) — and it is
+ * one sixth of the Vercel Firewall rule's 60/60 s per IP, so the deployment-wide
+ * rule stays the OUTER bound and this stays the tighter one per instance. It is
+ * deliberately not lower: the browser cannot be told "wait" before its startup
+ * gate, and a budget that refuses a legitimate run would be a product change,
+ * not a hardening one.
  *
  * The key comes from `callerIdentity` — the platform's client address, never a
  * caller-supplied header. A caller that trips this budget gets 429, the runtime
@@ -117,7 +139,7 @@ const MAX_BODY_BYTES = JEV_LIMITS.REQUEST_BODY_BYTES;
  * server-side.
  */
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 180;
+const RATE_LIMIT_MAX_REQUESTS = 10;
 /** Hard cap on tracked callers, so the counter cannot grow without bound. */
 const RATE_LIMIT_MAX_KEYS = 4_096;
 
@@ -127,41 +149,6 @@ interface RateWindow {
 }
 
 const rateWindows = new Map<string, RateWindow>();
-
-/**
- * The deployment-wide limiter: Vercel's own Firewall rate limiting.
- *
- * `checkRateLimit` matches a rule defined in the Firewall by id, and keys it on
- * the same client address this route uses. Set `JEV_RATE_LIMIT_ID` to turn it
- * on; with no rule configured the platform answers "not-found", which is
- * reported once per process and then treated as "not configured" rather than as
- * a block. The limit itself is counted by the platform, not by us, so it holds
- * across every instance of this deployment.
- */
-const rateLimitId = process.env.JEV_RATE_LIMIT_ID?.trim();
-
-let warnedMissingRule = false;
-
-/** True when the platform says this request is over its rule's budget. */
-async function platformRateLimited(request: Request, key: string): Promise<boolean> {
-  if (rateLimitId === undefined || rateLimitId === "" || process.env.NODE_ENV !== "production") {
-    return false;
-  }
-  try {
-    const { rateLimited, error } = await checkRateLimit(rateLimitId, { request, rateLimitKey: key });
-    if (error === "not-found" && !warnedMissingRule) {
-      warnedMissingRule = true;
-      console.error(
-        "[jev-relay] no Vercel Firewall rate-limit rule matches JEV_RATE_LIMIT_ID; only the per-instance budget is active",
-      );
-    }
-    return rateLimited || error === "blocked";
-  } catch {
-    // Availability wins over an optional extra guard: the request continues to
-    // the instance-local budget rather than failing because the platform call did.
-    return false;
-  }
-}
 
 /**
  * True when the caller may spend one request here. Fixed window, per instance.
@@ -557,32 +544,57 @@ export async function POST(request: Request): Promise<Response> {
   // Identity comes from the platform (see caller.ts), never from the caller's
   // own forwarding headers, and is never echoed back in a response.
   const key = callerIdentity(request);
-  if (await platformRateLimited(request, key)) {
+  // The deployment-wide guard, consulted first because it is the outer bound
+  // (firewall.ts). Three verdicts, three outcomes, and the middle one is the
+  // security pass's fix: a guard that is configured but cannot be consulted
+  // REFUSES rather than silently letting an unbounded, deployment-wide spend
+  // through.
+  const guard = await platformGuardVerdict(request, key);
+  if (guard === "limited") {
     return deny(429, "too many policy requests", "rate-limited");
+  }
+  if (guard === "unavailable") {
+    // 503, not 429: the caller did nothing wrong and is not over any budget —
+    // this DEPLOYMENT cannot safely spend right now. Saying 429 would frame a
+    // caller-side cause, would hide a broken or missing Firewall rule inside
+    // ordinary rate-limit telemetry, and would make an operational failure look
+    // like demand. A 5xx is the honest signal, and it is what makes the release
+    // smoke (scripts/jev-prod-smoke.ts) fail loudly on a misconfigured rule
+    // instead of quietly serving an unbounded deployment. The body stays one
+    // short sentence of this codebase's own words: the platform's error, the
+    // rule id and the client address are all absent, by construction.
+    //
+    // The reason CLASS is the 5xx member of the shared vocabulary, borrowed the
+    // same way the cross-origin refusal borrows `rejected`: the run then backs
+    // off instead of retrying in a burst, and the class is a closed enum the
+    // browser already understands. The condition itself — missing rule or failed
+    // lookup — is named in the operator's log line (firewall.ts), never here.
+    return deny(503, "policy requests are unavailable", "upstream-error");
   }
   if (!allowRequest(key, Date.now())) {
     return deny(429, "too many policy requests", "rate-limited");
   }
 
+  // The declared length is a claim, so it is only a fast path: a request that
+  // says it is over the ceiling is refused without reading a byte.
   const declaredLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
     return deny(413, "request body is too large", "rejected");
   }
 
-  let text: string;
-  try {
-    text = await request.text();
-  } catch {
-    return deny(400, "request body could not be read", "rejected");
-  }
-  // The declared length is a claim; this is the actual size.
-  if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
-    return deny(413, "request body is too large", "rejected");
+  // The ACTUAL size is enforced WHILE the body is read (see body.ts), so a
+  // chunked or length-less request cannot make this function buffer a body of
+  // arbitrary size before the check.
+  const read = await readBoundedBody(request, MAX_BODY_BYTES);
+  if (!read.ok) {
+    return read.reason === "too-large"
+      ? deny(413, "request body is too large", "rejected")
+      : deny(400, "request body could not be read", "rejected");
   }
 
   let body: unknown;
   try {
-    body = JSON.parse(text) as unknown;
+    body = JSON.parse(read.text) as unknown;
   } catch {
     return deny(400, "request body must be JSON", "rejected");
   }

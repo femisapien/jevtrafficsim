@@ -76,11 +76,11 @@
  *   B. THE RELAY DOES NOT ALREADY PROTECT THE UPSTREAM ALLOWANCE. Its guards
  *      are real but a different size: the Vercel Firewall rule (60 requests/60 s
  *      per IP, deployment-wide when the rule exists) and the instance-local
- *      limiter (180/60 s) are an order of magnitude above the upstream's 5 per
- *      ~60 s, so neither stops a second tab from spending the upstream window.
- *      The relay's contribution is the credential boundary, the schema
- *      validation and forwarding the pause (`x-jev-retry-after-ms`), not a
- *      global quota.
+ *      limiter (10/60 s per instance per IP since the security pass, 180/60 s
+ *      before it) are still above the upstream's 5 per ~60 s, so neither stops a
+ *      second tab from spending the upstream window. The relay's contribution is
+ *      the credential boundary, the schema validation and forwarding the pause
+ *      (`x-jev-retry-after-ms`), not a global quota.
  *   C. TRUE GLOBAL ENFORCEMENT IS NOT IN THIS REPOSITORY. Two tabs each holding
  *      their own session gate CAN jointly exceed the real allowance, and no
  *      browser-side object can prevent that. Correct enforcement needs shared

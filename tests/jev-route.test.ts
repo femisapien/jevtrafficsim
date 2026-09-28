@@ -125,13 +125,29 @@ function request(overrides: Partial<JevPolicyRequest> = {}): JevPolicyRequest {
  * exactly as Vercel does in production, and a test that wants to be its own
  * caller overrides it. Requests WITHOUT it share one bucket on purpose — that is
  * the fail-closed behaviour of `callerIdentity`.
+ *
+ * Since the hardening pass each request gets its OWN address by default: the
+ * relay's budget is per caller (10 requests / 60 s per address per instance),
+ * and one suite is not one caller. A test that is ABOUT the budget passes the
+ * same address on every call, which is exactly what its loop does.
  */
 const TEST_CLIENT_IP = "198.51.100.10";
+
+let callerSeed = 0;
+function nextCallerIp(): string {
+  callerSeed += 1;
+  if (callerSeed === 1) {
+    return TEST_CLIENT_IP;
+  }
+  // A wide space on purpose: every request in this suite is its own caller, and
+  // two requests must never wrap onto one address while its window is open.
+  return `198.51.${Math.floor(callerSeed / 200)}.${(callerSeed % 200) + 11}`;
+}
 
 function post(body: unknown, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   if (!headers.has("x-real-ip")) {
-    headers.set("x-real-ip", TEST_CLIENT_IP);
+    headers.set("x-real-ip", nextCallerIp());
   }
   if (!headers.has("content-type")) {
     headers.set("content-type", "application/json");
@@ -827,7 +843,7 @@ describe("public relay abuse guard (Issue #15)", () => {
     const headers = { "content-type": "application/json", "x-real-ip": "203.0.113.7" };
     let served = 0;
     let refused = 0;
-    for (let index = 0; index < 200 && refused === 0; index += 1) {
+    for (let index = 0; index < 40 && refused === 0; index += 1) {
       const response = await post(request(), { headers });
       if (response.status === 200) {
         served += 1;
@@ -836,15 +852,18 @@ describe("public relay abuse guard (Issue #15)", () => {
         refused += 1;
       }
     }
-    // A generous budget for a real visitor, a hard stop for a runaway client.
-    expect(served).toBe(180);
+    // The security pass's budget: 2.5x the 4 requests per trailing 60 s the
+    // browser's own scheduler spends (and 1/6 of the Firewall rule's 60/60 s),
+    // so one honest session — even with a second tab open — fits, and a runaway
+    // client is stopped after ten requests instead of a hundred and eighty.
+    expect(served).toBe(10);
     expect(refused).toBe(1);
     // The 429 came before the upstream call: the budget stopped the work, and
     // the refused request is not a request the model ever sees.
-    expect(calls()).toBe(180);
+    expect(calls()).toBe(10);
     const after = await post(request(), { headers });
     expect(after.status).toBe(429);
-    expect(calls()).toBe(180);
+    expect(calls()).toBe(10);
   });
 
   it("refuses a body that lies about its length", async () => {
@@ -953,7 +972,7 @@ describe("caller identity (Issue #37)", () => {
     // never changes. If the forged header were the key, this would never refuse.
     let refused = 0;
     let served = 0;
-    for (let index = 0; index < 200 && refused === 0; index += 1) {
+    for (let index = 0; index < 40 && refused === 0; index += 1) {
       const response = await post(request(), {
         headers: {
           "content-type": "application/json",
@@ -967,7 +986,7 @@ describe("caller identity (Issue #37)", () => {
         served += 1;
       }
     }
-    expect(served).toBe(180);
+    expect(served).toBe(10);
     expect(refused).toBe(1);
   });
 });

@@ -95,7 +95,6 @@ const TYPESAFE_KEY = "typesafe-key-that-must-never-reach-the-browser";
 const LEGACY_TOKEN = "legacy-token-that-must-never-reach-the-browser";
 /** The upstream's own words: they must never cross the relay boundary. */
 const UPSTREAM_PROSE = "upstream said: the credential is revoked";
-const TEST_CLIENT_IP = "198.51.100.77";
 const RELAY_URL = "https://app.invalid/api/jev/policy";
 
 const ENV_KEYS = [
@@ -167,7 +166,12 @@ function browserRelay(now?: () => number): RelaySeam {
     fetchImpl: (async (url: string, init: RequestInit) => {
       if (now !== undefined) walls.push(now());
       const headers = new Headers(init.headers as HeadersInit);
-      headers.set("x-real-ip", TEST_CLIENT_IP);
+      // A relay call is a CALLER, and the route's budget is per caller (10
+      // requests / 60 s per address per instance since the hardening pass).
+      // Each probe here is its own client, so no case can spend another's
+      // budget — a matrix row is not an abusive caller.
+      relayCaller += 1;
+      headers.set("x-real-ip", `203.0.${Math.floor(relayCaller / 200)}.${(relayCaller % 200) + 1}`);
       const response = await POST(new Request(String(url), { ...init, headers }));
       relayed.push(response.clone());
       return response;
@@ -175,6 +179,8 @@ function browserRelay(now?: () => number): RelaySeam {
   });
   return { client, relayed, walls };
 }
+
+let relayCaller = 0;
 
 /** Stub the transport's upstream. Returns a call counter. */
 function stubUpstream(handler: (init: RequestInit, call: number) => Response | Promise<Response>): () => number {

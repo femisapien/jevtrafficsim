@@ -206,15 +206,23 @@ For a public deployment, configure a matching Vercel Firewall rate-limit rule an
 `JEV_RATE_LIMIT_ID` to its **Rate Limit API ID**, the handle the rule's condition matches,
 printed by `vercel firewall rules inspect <rule>` as `Conditions: rate limit API ID equals
 <value>`. Do **not** use the rule's own generated `rule_...` identifier: the CLI accepts it,
-and at runtime the SDK's lookup finds no rule, the route logs
-`no Vercel Firewall rate-limit rule matches JEV_RATE_LIMIT_ID`, and only the per-instance
-budget is active. Environment variables reach the running deployment only on a new
-deployment, so redeploy after changing this. The route's in-memory budget is per serverless
-instance, not a production-wide cost limit. Verify the rule with
+and at runtime the SDK's lookup finds no rule — which, in production, is now a **fail-closed
+condition**: the relay logs `JEV_RATE_LIMIT_ID is set but no Vercel Firewall rate-limit rule
+matches it; refusing policy requests (fail closed)` and answers 503 without calling the model,
+because a configured-but-unresolvable guard is a deployment with no deployment-wide cost
+bound. The same applies when the Firewall lookup itself fails. **Unset `JEV_RATE_LIMIT_ID`**
+to run without the platform guard on purpose (that is also the local-development path): the
+route then relies on its per-instance budget, which is 10 requests per 60 s per client
+address, per serverless instance — 2.5x one browser session's measured demand (the scheduler
+spends at most 4 requests per trailing 60 s) and one sixth of the Firewall rule's 60/60 s, so
+the platform rule stays the outer bound. It bounds a runaway caller on one instance; it is
+not a production-wide cost limit. Environment variables reach the running deployment only on
+a new deployment, so redeploy after changing this. Verify the rule with
 `vercel firewall rules inspect`: repository tests cannot prove it exists. `/api/build`
 exposes the deployed commit SHA (or `unknown` when the platform provides no build identity).
 The manual Jev production smoke is separate from routine CI and must prove a completed run
-used live policy before calling a release live-Jev verified.
+used live policy before calling a release live-Jev verified — and, since the guard is
+fail-closed, it is also what catches a missing or misconfigured Firewall rule in production.
 
 ## Developer flags
 
