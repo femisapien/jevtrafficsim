@@ -4,7 +4,8 @@
  */
 import type { IncidentKind } from "@/sim/incidents";
 import type { CitySize, TrafficLevel } from "@/sim/types";
-import type { ControllerChoice } from "@/worker/protocol";
+import type { ControllerChoice, PlaybackSpeed } from "@/worker/protocol";
+import { PLAYBACK_SPEEDS } from "@/worker/protocol";
 import { DRIVER_DESCRIPTIONS, type DriverStrategy } from "@/sim/driver";
 import { CURATED_TRIPS } from "@/cities/chicago-trips";
 import {
@@ -703,6 +704,72 @@ export function runShowsNonComparable(input: RunGovernanceLike): boolean {
 /** Shown once when a live setting change (not an incident) breaks comparability. */
 export const CLEAN_RUN_LOST_NOTICE =
   "This run is now modified: the clean comparison with Fixed and Adaptive is off.";
+
+/* ------------------------------------------------------------------ */
+/* The run's two controls (final polish pass)                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The words on them. Obvious, short, and the same on every surface: a phone
+ * shows them in the trip card, the wide layout in the control strip, and both
+ * mean exactly the same thing.
+ */
+export const SKIP_TO_END_LABEL = "Skip to end";
+export const SPEED_LABEL = "3× speed";
+
+/**
+ * Whether the two run controls apply at all.
+ *
+ * Both are conveniences over a run that is UNDER WAY, and neither is offered
+ * where it could not do what it says:
+ *
+ *   - before the startup gate passes, no simulated time is passing, so there is
+ *     nothing to finish early and nothing to watch faster;
+ *   - a run that could not start, or that was stopped because Jev was lost, is
+ *     over — its own message is the whole account of it;
+ *   - once the trip has ARRIVED, the remaining simulated time is the run's own
+ *     tail (the window its comparison needs), not something the user is sitting
+ *     through: skipping it is already what the app does, and the speed of a
+ *     parked car means nothing;
+ *   - and a completed run has published its result.
+ */
+export function runControlsVisible(input: {
+  /** A run exists and has reported a frame (its trip is known). */
+  readonly started: boolean;
+  /** Waiting for the first live policy: no simulated time is passing. */
+  readonly starting: boolean;
+  /** The run is not in flight (it could not start, or was stopped). */
+  readonly failed: boolean;
+  /** The trip is over. */
+  readonly arrived: boolean;
+  readonly runComplete: boolean;
+}): boolean {
+  return input.started && !input.starting && !input.failed && !input.arrived && !input.runComplete;
+}
+
+/**
+ * The other speed. Two states, no system: pressing the control swaps the run's
+ * playback between normal and 3× — the engine steps one real tick runs.
+ */
+export function nextPlaybackSpeed(speed: PlaybackSpeed): PlaybackSpeed {
+  return speed === PLAYBACK_SPEEDS[0] ? PLAYBACK_SPEEDS[1] : PLAYBACK_SPEEDS[0];
+}
+
+/** The title a run wears when it could not finish: it did not complete. */
+export const RUN_STOPPED_TITLE = "Run stopped";
+
+/**
+ * What the payoff says while the run's own window is still open.
+ *
+ * The panel is up from the ARRIVAL, and normally what is left is the wait for
+ * the run's tail and then for the comparison. A run that was STOPPED in that
+ * last stretch (Jev was lost, so the contract ends it there) is not finishing
+ * anything, and a skipped or halted run must not be told it is about to get a
+ * comparison it cannot have: the panel carries the worker's own reason instead.
+ */
+export function waitingPanelState(input: { readonly error: string | null }): "finishing" | "stopped" {
+  return input.error === null ? "finishing" : "stopped";
+}
 
 /**
  * What the payoff panel should be showing after arrival. `waiting` is the only

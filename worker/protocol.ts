@@ -36,6 +36,62 @@ export const SIM_TICK_MS = 100;
 export const PLAYBACK_STEPS_PER_TICK = 8;
 
 /**
+ * The two playback speeds the user may watch a run at (final polish pass):
+ * normal, and 3× it. A speed multiplies the engine steps ONE real tick runs —
+ * `PLAYBACK_STEPS_PER_TICK × speed` — so it changes how fast the run is
+ * watched and nothing about the run: the same steps run in the same order, and
+ * no engine or controller decision reads the wall clock. There is no other
+ * multiplier anywhere: this is a two-state toggle, not a speed system.
+ *
+ * What it does change is the WALL-CLOCK rate the same simulated refresh grid
+ * asks at, and the service budget (jev/scheduler.ts) is wall-clock paced: at 3×
+ * the run reaches its simulator-time refresh windows three times sooner per
+ * second of wall time, so the gate may decline more of them and more of the run
+ * is HELD policy — reported as held, never hidden by relaxing the budget and
+ * never answered by substituting another controller.
+ */
+export const PLAYBACK_SPEEDS = [1, 3] as const;
+export type PlaybackSpeed = (typeof PLAYBACK_SPEEDS)[number];
+
+/**
+ * Playback for "Skip to end" (final polish pass): the engine steps ONE real tick
+ * runs while the user has asked to finish the run without watching the rest.
+ *
+ * Not chosen for feel — DERIVED from the bound the run's own policy coverage
+ * imposes, because a skipped run must still land in its honest, completed
+ * payoff:
+ *
+ *   one accepted policy may govern   MAX_HOLD_CADENCES x SERVICE_CADENCE_SIM_MS
+ *                                    = 4 x 120 s = 480 s of simulated time
+ *                                    (jev/runtime.ts, at the shipped playback)
+ *   and the wall-clock budget grants at most one request per
+ *                                    JEV_SERVICE_MIN_SPACING_MS = 15 s of wall
+ *                                    time (jev/scheduler.ts, the measured
+ *                                    upstream allowance)
+ *
+ * so the soonest a replacement policy can arrive is one service spacing of wall
+ * time after the last request, and advancing faster than (480 s / 15 s) = 32x
+ * real time would outrun the service by construction: the policy in force would
+ * expire before its replacement could be accepted, and the run would be
+ * INVALIDATED rather than finished. A quarter of that bound is left as margin —
+ * a late answer, the refresh grid's own granularity, a tick that overruns —
+ * which puts the skip at 24x, three times the normal visible playback.
+ *
+ * That is also the fastest pace this simulation thread can sustain on current
+ * hardware: one engine step of the Metro city costs ~4 ms, so 24 steps per
+ * 100 ms tick is already the machine's ceiling (measured 22 s of simulated time
+ * per wall second, the same rate "3× speed" reaches). The difference the control
+ * makes is not the pace but the omission: the run is finished, and the payoff
+ * arrives, without anyone watching the rest of the route — honestly, because the
+ * skipped stretch is simulated by exactly the same steps, still asks on the
+ * run's own refresh schedule, and reports the time it spent on a HELD policy.
+ *
+ * tests/run-controls.test.ts pins this arithmetic against the constants it
+ * describes, so the pace cannot drift outside the coverage bound.
+ */
+export const SKIP_STEPS_PER_TICK = 24;
+
+/**
  * Frame cadence: the worker posts exactly ONE presentation frame and one
  * metrics sample per REAL tick, so the renderer's interpolation window is
  * SIM_TICK_MS. This used to be expressed as "every N engine ticks", which
@@ -95,6 +151,17 @@ export type WorkerCommand =
     }
   | { readonly type: "START" }
   | { readonly type: "PAUSE" }
+  /**
+   * Finish this run at once (final polish pass): the rest of the horizon is
+   * simulated back to back through the SAME accelerated tail an arrived run
+   * already uses, and the run then completes normally — the arrival/completion
+   * frame, the payoff and the baselines all fire exactly as they do for a
+   * watched run. The ego may or may not arrive inside that tail; either outcome
+   * is reported as it actually happened, and nothing is fabricated.
+   */
+  | { readonly type: "SKIP_TO_END" }
+  /** Watch this run at one of PLAYBACK_SPEEDS. Pacing only — never the world. */
+  | { readonly type: "SET_SPEED"; readonly speed: PlaybackSpeed }
   | { readonly type: "RESET"; readonly mode: "same-seed" | "new-seed" }
   | { readonly type: "SET_CONTROLLER"; readonly controller: ControllerChoice }
   /**
@@ -346,7 +413,18 @@ export function parseWorkerCommand(raw: unknown): WorkerCommand {
     }
     case "START":
     case "PAUSE":
+    case "SKIP_TO_END":
       return { type };
+    case "SET_SPEED": {
+      const speed = record.speed;
+      if (typeof speed !== "number" || !(PLAYBACK_SPEEDS as readonly number[]).includes(speed)) {
+        fail(
+          "SET_SPEED.speed",
+          `expected one of ${PLAYBACK_SPEEDS.join(", ")}, received ${String(speed)}`,
+        );
+      }
+      return { type, speed: speed as PlaybackSpeed };
+    }
     case "COMPARE": {
       const tripId = readChoice("COMPARE.tripId", record.tripId, CURATED_TRIP_IDS);
       const trafficLevel = readChoice("COMPARE.trafficLevel", record.trafficLevel, TRAFFIC_LEVEL_CHOICES);

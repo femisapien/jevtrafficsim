@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * TripHUD (Issue #25, consolidated in Issue #49; phone pass).
+ * TripHUD (Issue #25, consolidated in Issue #49; phone pass; final polish pass).
  *
  * ONE panel answers everything the live view has to say: which trip, how it is
  * going, and what is driving the signals. The run-identity card that used to
@@ -14,10 +14,17 @@
  * identity and the context share lines instead of stacking four of them; the
  * three facts a visitor reads mid-race (elapsed, left, speed) are one compact
  * three-cell row with a short label each, not three label/value rows; and the
- * two things the chrome owes the user mid-startup — "Waiting for Jev's first
- * policy" and any run-level error — are announced IN this card instead of as
+ * two things the chrome owes the user mid-startup — the wait for Jev's first
+ * policy, and any run-level error — are announced IN this card instead of as
  * their own floating block on top of it. Desktop keeps the panel exactly where
  * it was, bottom-left at 240px.
+ *
+ * Final polish pass: the phone's two run controls — "Skip to end" and
+ * "3× speed" — sit at the BOTTOM of this card, where a thumb already is, as the
+ * only two buttons on the surface. They vanish when a run has nothing left to
+ * skip or speed up (RunControls owns that rule). Nothing new floats over the
+ * map, and the card's live region stays what it was: everything the panel
+ * REPORTS, with no interactive element inside it.
  *
  * Stopped time, intersections cleared, the estimate and the citywide health
  * block are still computed and still shown, on the wide layout, behind ?debug.
@@ -27,6 +34,7 @@
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useUiStore } from "@/store/ui-store";
+import { RunControls } from "./RunControls";
 import {
   formatDuration,
   formatPercent,
@@ -61,7 +69,13 @@ function Metric({ label, value }: { label: string; value: string }) {
 /** "Remaining" is a column heading on a phone, so it is said in one word. */
 const COMPACT_LABEL: Record<string, string> = { Remaining: "Left" };
 
-export function TripHUD() {
+export function TripHUD({
+  onSkipToEnd,
+  onToggleSpeed,
+}: {
+  onSkipToEnd: () => void;
+  onToggleSpeed: () => void;
+}) {
   const phase = useUiStore((state) => state.phase);
   const runComplete = useUiStore((state) => state.runComplete);
   const starting = useUiStore((state) => state.starting);
@@ -110,116 +124,130 @@ export function TripHUD() {
           exit={{ opacity: 0, y: 6 }}
           transition={{ duration: 0.32, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}
         >
-          <div
-            className="surface flex flex-col px-3.5 py-3 sm:px-4 sm:py-3.5"
-            role="status"
-            aria-label="Trip"
-          >
-            {/* Identity: the panel's own name, the trip, and its state. */}
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="label-micro">Jev Traffic · Chicago</span>
-              <span
-                className={`label-micro shrink-0 ${view?.completed ? "text-ink" : "text-ink-70"}`}
-              >
-                {view?.state ?? "—"}
-              </span>
-            </div>
-            <span className="mt-1.5 min-w-0 truncate text-ui font-medium text-ink">
-              {view?.tripName ?? "Trip"}
-            </span>
-            {/* One context line: how busy the city is, who is driving, and who is
-                running the signals (the label carries its own detail on hover). */}
-            <div className="mt-2 flex items-baseline justify-between gap-3">
-              <span className="truncate text-meta leading-tight text-ink-70">
-                {trafficLabel(trafficLevel)} · {driverLabel(driver)}
-              </span>
-              <span
-                className="shrink-0 text-meta leading-none text-ink-70"
-                title={provenance?.detail ?? undefined}
-              >
-                {provenance?.text ?? controller}
-              </span>
-            </div>
+          <div className="surface flex flex-col px-3.5 py-3 sm:px-4 sm:py-3.5">
             {/*
-              The status the run owes the user, in the card that already answers
-              "what is happening": the wait for Jev's first policy, or the reason
-              this run is not running at all. Never a block on top of the map,
-              never a second panel to read past.
+              What the card reports, as one live region. The controls underneath
+              are deliberately OUTSIDE it: a button is not a status, and an
+              interactive element inside a status region is announced as part of
+              every update.
             */}
-            {error !== null ? (
-              <div className="mt-2.5 flex items-start gap-2 border-t border-hairline pt-2.5">
+            <div role="status" aria-label="Trip">
+              {/* Identity: the panel's own name, the trip, and its state. */}
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="label-micro">Jev Traffic · Chicago</span>
                 <span
-                  className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full bg-[#b0392b]"
-                  aria-hidden="true"
-                />
-                <span className="text-meta leading-snug text-ink-70">{error}</span>
-              </div>
-            ) : starting ? (
-              <div className="mt-2.5 flex items-center gap-2 border-t border-hairline pt-2.5">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ink/40" aria-hidden="true" />
-                <span className="text-meta leading-snug text-ink-70">
-                  Waiting for Jev&apos;s first policy — the run starts when it arrives.
+                  className={`label-micro shrink-0 ${view?.completed ? "text-ink" : "text-ink-70"}`}
+                >
+                  {view?.state ?? "—"}
                 </span>
               </div>
-            ) : (
-              <>
-                {/* Phone: the three facts of the race as one compact row. */}
-                <div className="mt-2.5 grid grid-cols-3 gap-x-3 border-t border-hairline pt-2.5 sm:hidden">
-                  {view ? (
-                    primaryRows.map((row) => (
-                      <Metric
-                        key={row.label}
-                        label={COMPACT_LABEL[row.label] ?? row.label}
-                        value={row.value}
-                      />
-                    ))
-                  ) : (
-                    Array.from({ length: 3 }, (_, index) => (
-                      <span
-                        key={index}
-                        className="h-[9px] w-10 animate-pulse rounded-full bg-ink/10"
-                      />
-                    ))
-                  )}
-                </div>
-                {/* Wide layout: the same facts, one rule above them, one per row. */}
-                <div className="mt-3.5 hidden flex-col gap-2.5 border-t border-hairline pt-3.5 sm:flex">
-                  {view ? (
-                    view.rows
-                      .filter((row) => debug || PRIMARY_ROWS.includes(row.label))
-                      .map((row) => <Row key={row.label} label={row.label} value={row.value} />)
-                  ) : (
-                    Array.from({ length: 3 }, (_, index) => (
-                      <div key={index} className="grid grid-cols-[1fr_auto] items-baseline gap-4">
-                        <span className="label-micro">·</span>
-                        <span className="h-[9px] w-10 animate-pulse rounded-full bg-ink/10" />
-                      </div>
-                    ))
-                  )}
-                </div>
-              </>
-            )}
-            {runShowsNonComparable({ modified, manualIncidents }) && (
-              <span className="mt-2.5 border-t border-hairline pt-2 text-meta leading-none text-ink-70 sm:mt-3 sm:pt-2.5">
-                modified · not comparable
+              <span className="mt-1.5 block min-w-0 truncate text-ui font-medium text-ink">
+                {view?.tripName ?? "Trip"}
               </span>
-            )}
-            {debug && (
-              <div className="mt-0.5 border-t border-hair pt-2">
-                <div className="value-num mb-1 truncate text-micro text-ink-38">
-                  {scenarioFingerprint ?? "—"}
-                </div>
-                <div className="mb-1 label-micro text-ink-38">City traffic · debug</div>
-                <div className="value-num flex items-baseline justify-between text-micro text-ink-38">
-                  <span>{formatDuration(metrics?.averageWaitTimeMs ?? 0)} avg wait</span>
-                  <span>{formatPercent(metrics?.gridlockRatio ?? 0)} gridlock</span>
-                </div>
-                <div className="value-num mt-[3px] flex items-baseline justify-between text-micro text-ink-38">
-                  <span>{(metrics?.activeVehicles ?? 0).toLocaleString("en-US")} active</span>
-                  <span>{(metrics?.completedTrips ?? 0).toLocaleString("en-US")} trips</span>
-                </div>
+              {/* One context line: how busy the city is, who is driving, and who is
+                  running the signals (the label carries its own detail on hover). */}
+              <div className="mt-2 flex items-baseline justify-between gap-3">
+                <span className="truncate text-meta leading-tight text-ink-70">
+                  {trafficLabel(trafficLevel)} · {driverLabel(driver)}
+                </span>
+                <span
+                  className="shrink-0 text-meta leading-none text-ink-70"
+                  title={provenance?.detail ?? undefined}
+                >
+                  {provenance?.text ?? controller}
+                </span>
               </div>
-            )}
+              {/*
+                The status the run owes the user, in the card that already answers
+                "what is happening": the wait for Jev's first policy, or the reason
+                this run is not running at all. Never a block on top of the map,
+                never a second panel to read past.
+              */}
+              {error !== null ? (
+                <div className="mt-2.5 flex items-start gap-2 border-t border-hairline pt-2.5">
+                  <span
+                    className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full bg-[#b0392b]"
+                    aria-hidden="true"
+                  />
+                  <span className="text-meta leading-snug text-ink-70">{error}</span>
+                </div>
+              ) : starting ? (
+                <div className="mt-2.5 flex items-center gap-2 border-t border-hairline pt-2.5">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ink/40" aria-hidden="true" />
+                  <span className="text-meta leading-snug text-ink-70">
+                    The run starts when Jev&apos;s first policy arrives.
+                  </span>
+                </div>
+              ) : (
+                <>
+                  {/* Phone: the three facts of the race as one compact row. */}
+                  <div className="mt-2.5 grid grid-cols-3 gap-x-3 border-t border-hairline pt-2.5 sm:hidden">
+                    {view ? (
+                      primaryRows.map((row) => (
+                        <Metric
+                          key={row.label}
+                          label={COMPACT_LABEL[row.label] ?? row.label}
+                          value={row.value}
+                        />
+                      ))
+                    ) : (
+                      Array.from({ length: 3 }, (_, index) => (
+                        <span
+                          key={index}
+                          className="h-[9px] w-10 animate-pulse rounded-full bg-ink/10"
+                        />
+                      ))
+                    )}
+                  </div>
+                  {/* Wide layout: the same facts, one rule above them, one per row. */}
+                  <div className="mt-3.5 hidden flex-col gap-2.5 border-t border-hairline pt-3.5 sm:flex">
+                    {view ? (
+                      view.rows
+                        .filter((row) => debug || PRIMARY_ROWS.includes(row.label))
+                        .map((row) => <Row key={row.label} label={row.label} value={row.value} />)
+                    ) : (
+                      Array.from({ length: 3 }, (_, index) => (
+                        <div key={index} className="grid grid-cols-[1fr_auto] items-baseline gap-4">
+                          <span className="label-micro">·</span>
+                          <span className="h-[9px] w-10 animate-pulse rounded-full bg-ink/10" />
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
+              {runShowsNonComparable({ modified, manualIncidents }) && (
+                <span className="mt-2.5 block border-t border-hairline pt-2 text-meta leading-none text-ink-70 sm:mt-3 sm:pt-2.5">
+                  modified · not comparable
+                </span>
+              )}
+              {debug && (
+                <div className="mt-0.5 border-t border-hair pt-2">
+                  <div className="value-num mb-1 truncate text-micro text-ink-38">
+                    {scenarioFingerprint ?? "—"}
+                  </div>
+                  <div className="mb-1 label-micro text-ink-38">City traffic · debug</div>
+                  <div className="value-num flex items-baseline justify-between text-micro text-ink-38">
+                    <span>{formatDuration(metrics?.averageWaitTimeMs ?? 0)} avg wait</span>
+                    <span>{formatPercent(metrics?.gridlockRatio ?? 0)} gridlock</span>
+                  </div>
+                  <div className="value-num mt-[3px] flex items-baseline justify-between text-micro text-ink-38">
+                    <span>{(metrics?.activeVehicles ?? 0).toLocaleString("en-US")} active</span>
+                    <span>{(metrics?.completedTrips ?? 0).toLocaleString("en-US")} trips</span>
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* The phone's two run controls, at the foot of the card a thumb is
+                already resting on. Wide layouts get the same pair in the control
+                strip; the rule for when they apply lives in RunControls. */}
+            <div className="mt-2.5 sm:hidden">
+              <RunControls
+                variant="card"
+                onSkipToEnd={onSkipToEnd}
+                onToggleSpeed={onToggleSpeed}
+              />
+            </div>
           </div>
         </motion.div>
       )}

@@ -37,6 +37,7 @@ import {
   CLEAN_RUN_LOST_NOTICE,
   debugMode,
   discardNeedsConfirm,
+  nextPlaybackSpeed,
   reviewStateNeedsNoConfirm,
   shouldReaskBaselines,
   runStoppedMessage,
@@ -469,6 +470,9 @@ export function TrafficSimulator() {
         driver: state.driver,
         seed: overrides.seed ?? state.seed,
       });
+      // Pacing is a viewing preference, not part of the world: the run being
+      // built must be watched at the speed the control shows.
+      send({ type: "SET_SPEED", speed: state.speed });
     },
     [send],
   );
@@ -495,6 +499,31 @@ export function TrafficSimulator() {
   const onResume = useCallback(() => {
     send({ type: "START" });
     useUiStore.getState().setRunning(true);
+  }, [send]);
+
+  /**
+   * "Skip to end": finish this run now. The worker advances the same paced run
+   * at the fastest pace the run's own policy coverage allows — the same engine
+   * steps, the same refresh schedule, the same wall-clock service budget — until
+   * its horizon, so the run completes and publishes its payoff exactly as a
+   * watched one does. Nothing here fabricates an arrival, relaxes the budget or
+   * substitutes a controller; the ego may or may not arrive on the way, and
+   * either outcome is reported as it happened.
+   */
+  const onSkipToEnd = useCallback(() => {
+    send({ type: "SKIP_TO_END" });
+  }, [send]);
+
+  /**
+   * "3× speed": watch the run at 3× the normal playback — more engine steps per
+   * real tick, never a different run. The store owns the state so both surfaces
+   * show the same thing, and the worker is told every time it changes.
+   */
+  const onToggleSpeed = useCallback(() => {
+    const store = useUiStore.getState();
+    const speed = nextPlaybackSpeed(store.speed);
+    store.setSpeed(speed);
+    send({ type: "SET_SPEED", speed });
   }, [send]);
 
   const onController = useCallback(
@@ -764,6 +793,8 @@ export function TrafficSimulator() {
           onCancelDiscard={onCancelDiscard}
           onZoomIn={onZoomIn}
           onZoomOut={onZoomOut}
+          onSkipToEnd={onSkipToEnd}
+          onToggleSpeed={onToggleSpeed}
         />
         {/*
           Phone: ONE bottom stack — the trip card directly above the incident
@@ -772,7 +803,7 @@ export function TrafficSimulator() {
           (sm:contents) and each panel keeps the corner it always had.
         */}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col gap-2.5 px-3 pb-[calc(env(safe-area-inset-bottom)+12px)] sm:contents">
-          <TripHUD />
+          <TripHUD onSkipToEnd={onSkipToEnd} onToggleSpeed={onToggleSpeed} />
           <IncidentBar onIncident={onIncident} />
         </div>
       </div>

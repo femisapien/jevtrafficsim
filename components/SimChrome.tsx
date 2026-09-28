@@ -20,6 +20,11 @@
  * right. The two run-level messages that used to float over the middle of the
  * screen — waiting for Jev's first policy, and a run that could not start —
  * now render INSIDE the trip card, so nothing overlaps the map's action.
+ *
+ * Final polish pass: the run's two convenience controls — "Skip to end" and
+ * "3× speed" — join the wide control strip (a phone gets the same pair inside
+ * its trip card). They are the only panel material this pass added, and they
+ * appear on neither surface when there is nothing left to skip or speed up.
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
@@ -29,14 +34,17 @@ import { useUiStore } from "@/store/ui-store";
 import type { ControllerChoice } from "@/worker/protocol";
 import { DiscreteSlider, SeedField, Segmented, TickRow } from "./controls";
 import { ComparisonPanel, ComparisonSkeleton } from "./ComparisonPanel";
+import { RunControls } from "./RunControls";
 import {
   BASELINE_COMPUTING_TEXT,
   BASELINE_FAILED_DETAIL,
   BASELINE_FAILED_TEXT,
   BASELINE_RETRY_LABEL,
+  RUN_STOPPED_TITLE,
   baselinePanelState,
   discardCopy,
   runShowsNonComparable,
+  waitingPanelState,
 } from "./ui-model";
 import {
   CONTROLLER_OPTIONS,
@@ -69,6 +77,10 @@ interface SimChromeProps {
   onCancelDiscard: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
+  /** Finish this run at once, honestly (final polish pass). */
+  onSkipToEnd: () => void;
+  /** Watch this run at the other playback speed (normal | 3×). */
+  onToggleSpeed: () => void;
 }
 
 const EASE = [0.22, 1, 0.36, 1] as const;
@@ -276,6 +288,7 @@ export function SimChrome(props: SimChromeProps) {
   const baselinesRunning = useUiStore((state) => state.baselinesRunning);
   const baselinesFailed = useUiStore((state) => state.baselinesFailed);
   const pendingDiscard = useUiStore((state) => state.pendingDiscard);
+  const error = useUiStore((state) => state.error);
   const modified = useUiStore((state) => state.modified);
   const manualIncidents = useUiStore((state) => state.manualIncidents);
   const surgeFlash = useUiStore((state) => state.surgeFlash);
@@ -310,6 +323,8 @@ export function SimChrome(props: SimChromeProps) {
    * run cannot have.
    */
   const skeleton = runShowsNonComparable({ modified, manualIncidents }) ? "refusal" : "race";
+  /** The payoff's waiting state: the comparison's wait, or the run's stop. */
+  const waiting = waitingPanelState({ error });
 
   return (
     <>
@@ -375,6 +390,16 @@ export function SimChrome(props: SimChromeProps) {
                 </svg>
                 <span className="hidden sm:inline">{props.following ? "Following" : "Recenter"}</span>
               </button>
+              {/* The run's two controls, wide layout only: a phone shows the same
+                  pair inside its trip card, where the thumb already is. */}
+              <span className="mx-[3px] hidden h-[18px] w-px bg-hair sm:block" aria-hidden="true" />
+              <span className="hidden sm:flex">
+                <RunControls
+                  variant="strip"
+                  onSkipToEnd={props.onSkipToEnd}
+                  onToggleSpeed={props.onToggleSpeed}
+                />
+              </span>
               {/* Zoom is a pointer affordance: on touch the map pinches, and the
                   row has to fit 390px with the debug controller picker in it
                   (measured: it pushed Scenario off-screen when always shown). */}
@@ -489,19 +514,35 @@ export function SimChrome(props: SimChromeProps) {
               {/* The trip ended at the arrival; the run's window has not. Say
                   which of the two is still going, and show the comparison's
                   shape while it is prepared. Never "still playing": the car is
-                  parked, and the wait is the fairness rule doing its work. */}
+                  parked, and the wait is the fairness rule doing its work.
+                  A run that was STOPPED in that last stretch (Jev was lost, so
+                  the contract ends it there) is not finishing anything: the
+                  panel says so with the worker's own reason, and promises no
+                  comparison, because there is no completed run to compare. The
+                  card that normally carries that message has retired with the
+                  arrival, so this is where it has to be readable. */}
               {panel === "waiting" && (
                 <div role="status" aria-live="polite">
-                  <p className="text-ui font-medium text-ink">{ARRIVED_FINISHING_TEXT}</p>
-                  <p className="mt-2 text-meta leading-relaxed text-ink-70">
-                    {ARRIVED_FINISHING_DETAIL}
-                  </p>
-                  <p className="sr-only">{COMPARISON_PREPARING_ANNOUNCEMENT}</p>
+                  {waiting === "finishing" ? (
+                    <>
+                      <p className="text-ui font-medium text-ink">{ARRIVED_FINISHING_TEXT}</p>
+                      <p className="mt-2 text-meta leading-relaxed text-ink-70">
+                        {ARRIVED_FINISHING_DETAIL}
+                      </p>
+                      <p className="sr-only">{COMPARISON_PREPARING_ANNOUNCEMENT}</p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-ui font-medium text-ink">{RUN_STOPPED_TITLE}</p>
+                      <p className="mt-2 text-meta leading-relaxed text-ink-70">{error}</p>
+                    </>
+                  )}
                 </div>
               )}
               {/* The same skeleton for both waits — the run's tail and the two
-                  headless baselines are one continuous "results are coming". */}
-              {(panel === "waiting" || panel === "computing") && (
+                  headless baselines are one continuous "results are coming".
+                  A stopped run is owed no table, so it gets none. */}
+              {((panel === "waiting" && waiting === "finishing") || panel === "computing") && (
                 <ComparisonSkeleton variant={skeleton} />
               )}
             </div>

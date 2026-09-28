@@ -38,7 +38,9 @@ import {
 } from "@/jev/runtime";
 import { JEV_LIMITS, JEV_SCHEMA_VERSION, neutralJevPolicy, type JevPolicyRequest } from "@/jev/schema";
 import { policyLabel, causeReason } from "@/components/ui-model";
+import { createJevServiceGate } from "@/jev/scheduler";
 import { heldShare, ungovernedShare, type PresentationPolicy } from "@/worker/presentation-snapshot";
+import { SIM_TICK_MS, SKIP_STEPS_PER_TICK } from "@/worker/protocol";
 import { DEFAULT_SIGNAL_TIMING, SIMULATION_TIMESTEP_MS } from "@/sim/config";
 import { createEngine, stepEngine, type EngineState } from "@/sim/engine";
 import { buildObservationFrame } from "@/sim/observations";
@@ -181,6 +183,81 @@ describe("a policy keeps governing while nothing fresher arrives", () => {
     expect(expired.invalidMs).toBeGreaterThan(0);
     expect(expired.fallbackMs).toBe(0);
     expect(expired.adaptiveTicks).toBe(0);
+  });
+
+  it("finishes a SKIPPED run on the HELD policy, never on a substitute", () => {
+    // "Skip to end" (final polish pass) advances the run at SKIP_STEPS_PER_TICK
+    // through the ordinary paced loop, so the wall clock it spends per simulated
+    // second is a known quantity and the run's own refresh schedule keeps
+    // working: renewals land, the policy in force is HELD between them, and the
+    // run reaches its horizon instead of outrunning the model.
+    //
+    // The drive below IS that pace: one engine step (SIMULATION_TIMESTEP_MS of
+    // simulated time) per SIM_TICK_MS / SKIP_STEPS_PER_TICK of wall time, with
+    // the real runtime defaults (20 s refresh grid, 180 s freshness, 480 s
+    // maximum hold) and a real service gate on the same clock.
+    const { engine, partition } = crossroads();
+    let wallClockMs = 0;
+    const now = (): number => wallClockMs;
+    const gate = createJevServiceGate({ now, sleep: async () => undefined });
+    const runtime = createJevPolicyRuntime({
+      client: { id: "mock", requestPolicy: () => policy(1.1) },
+      scenarioFingerprint: "skip-to-end",
+      serviceGate: gate,
+      now,
+    });
+    expect(startedSync(runtime.start(observationOf(engine, partition))).state).toBe("ready");
+
+    const horizonMs = 600_000;
+    const wallPerStepMs = SIM_TICK_MS / SKIP_STEPS_PER_TICK;
+    while (engine.traffic.timeMs < horizonMs) {
+      runtime.observe(observationOf(engine, partition));
+      stepEngine(engine);
+      wallClockMs += wallPerStepMs;
+    }
+    runtime.finish(engine.traffic.timeMs);
+
+    const status = runtime.status();
+    expect(status.accepted).toBeGreaterThan(1);
+    expect(status.source).toBe("live");
+    expect(status.invalidation).toBeNull();
+    // Every simulated millisecond of the skipped run was governed by a policy
+    // the model actually returned — none of it by anything else.
+    expect(status.invalidMs).toBe(0);
+    expect(status.fallbackMs).toBe(0);
+    expect(status.adaptiveTicks).toBe(0);
+    expect(status.liveMs + status.replayMs + status.invalidMs).toBeGreaterThanOrEqual(horizonMs - 1);
+    // ...and the time the schedule could not refresh in is reported as HELD, so
+    // a skipped run can never read as a freshly-driven one.
+    expect(status.heldMs).toBeGreaterThan(0);
+    expect(status.heldMs).toBeLessThanOrEqual(status.liveMs);
+
+    // The pace is at a BOUND, not a preference: advancing faster than one
+    // maximum hold per service spacing (4 x 120 s of simulated time per 15 s of
+    // wall = 32x) outruns the service by construction, and the same drive then
+    // loses Jev — honestly, as an invalidation.
+    const tooFast = crossroads();
+    let fastWallMs = 0;
+    const fastNow = (): number => fastWallMs;
+    const fastRuntime = createJevPolicyRuntime({
+      client: { id: "mock", requestPolicy: () => policy(1.1) },
+      scenarioFingerprint: "skip-too-fast",
+      serviceGate: createJevServiceGate({ now: fastNow, sleep: async () => undefined }),
+      now: fastNow,
+    });
+    expect(startedSync(fastRuntime.start(observationOf(tooFast.engine, tooFast.partition))).state).toBe("ready");
+    const wallPerStepTooFastMs = SIM_TICK_MS / 33;
+    while (tooFast.engine.traffic.timeMs < horizonMs) {
+      fastRuntime.observe(observationOf(tooFast.engine, tooFast.partition));
+      stepEngine(tooFast.engine);
+      fastWallMs += wallPerStepTooFastMs;
+    }
+    const fastStatus = fastRuntime.status();
+    expect(fastStatus.invalidation).not.toBeNull();
+    expect(fastStatus.invalidMs).toBeGreaterThan(0);
+    // Never substituted, in either direction: no Adaptive path exists here.
+    expect(fastStatus.fallbackMs).toBe(0);
+    expect(fastStatus.adaptiveTicks).toBe(0);
   });
 
   it("names the cause of every failure instead of substituting for Jev", () => {

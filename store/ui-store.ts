@@ -14,7 +14,7 @@ import type {
   PresentationPolicy,
   PresentationTripProgress,
 } from "@/worker/presentation-snapshot";
-import type { ControllerChoice, RunConfig } from "@/worker/protocol";
+import type { ControllerChoice, PlaybackSpeed, RunConfig } from "@/worker/protocol";
 import type { DriverStrategy } from "@/sim/driver";
 import type { ChallengeResult } from "@/worker/challenge-result";
 import type { IncidentCapability } from "@/worker/challenge-incidents";
@@ -63,6 +63,13 @@ export interface UiState {
   /** Developer controls (?debug) only: controller choice and raw seed. */
   debug: boolean;
   seed: number;
+  /**
+   * How fast the run is being WATCHED (final polish pass): normal, or 3× as many
+   * engine steps per real tick. A view setting, never part of the scenario — it
+   * is shown on the control that owns it and mirrored to the worker, and it can
+   * neither change a run's outcome nor make it comparable or not.
+   */
+  speed: PlaybackSpeed;
   ready: boolean;
   /**
    * The run on screen is one the user ENTERED (a READY that was applied, not a
@@ -138,6 +145,7 @@ export interface UiState {
   setStarting: (starting: boolean) => void;
   setDebug: (debug: boolean) => void;
   setSeed: (seed: number) => void;
+  setSpeed: (speed: PlaybackSpeed) => void;
   setScenarioOpen: (open: boolean) => void;
   applyReady: (config: RunConfig, scaleLabel: string, fingerprint?: string) => void;
   setRunning: (running: boolean) => void;
@@ -197,6 +205,7 @@ export const useUiStore = create<UiState>()((set) => ({
   starting: false,
   debug: false,
   seed: 42,
+  speed: 1,
   ready: false,
   entered: false,
   running: false,
@@ -243,6 +252,7 @@ export const useUiStore = create<UiState>()((set) => ({
   setStarting: (starting) => set({ starting }),
   setDebug: (debug) => set({ debug }),
   setSeed: (seed) => set({ seed }),
+  setSpeed: (speed) => set({ speed }),
   setScenarioOpen: (scenarioOpen) => set({ scenarioOpen }),
   markCameraFramed: (fingerprint) => set({ cameraFramedFor: fingerprint }),
   applyReady: (config, scaleLabel, fingerprint) =>

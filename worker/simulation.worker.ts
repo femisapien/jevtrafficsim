@@ -76,7 +76,9 @@ import {
   parseWorkerCommand,
   PLAYBACK_STEPS_PER_TICK,
   SIM_TICK_MS,
+  SKIP_STEPS_PER_TICK,
   type ControllerChoice,
+  type PlaybackSpeed,
   type RunConfig,
   type WorkerCommand,
   type WorkerEvent,
@@ -122,6 +124,29 @@ interface WorkerState {
    * measurements kept and may not be resumed — only a new run may start.
    */
   invalidated: boolean;
+  /**
+   * How fast this run is being WATCHED (final polish pass): a multiplier over
+   * PLAYBACK_STEPS_PER_TICK — the engine steps one real tick runs. A view
+   * setting, so it survives a rebuild the way the scale does: the same run
+   * watched 3× faster runs the same steps, in the same order, and produces the
+   * same result.
+   */
+  speed: PlaybackSpeed;
+  /**
+   * "Skip to end" was asked for and is being honoured (final polish pass): the
+   * run is being advanced at SKIP_STEPS_PER_TICK until its horizon, then it
+   * completes through the ONE completion sequence. Sticky for the rest of THIS
+   * run — a skip is a decision about the run, not a mode — and cleared by the
+   * next build, so it can never finish a run nobody asked about.
+   */
+  skipToEnd: boolean;
+  /**
+   * A policy controller is waiting for its FIRST policy (the startup gate): no
+   * simulated time is passing, so there is nothing to skip and nothing to watch
+   * faster. It is what tells a paused run (which CAN be skipped — skipping ends
+   * it) from one that has not started at all.
+   */
+  awaitingPolicy: boolean;
 }
 
 const state: WorkerState = {
@@ -143,6 +168,9 @@ const state: WorkerState = {
   modified: false,
   buildToken: 0,
   invalidated: false,
+  speed: 1,
+  skipToEnd: false,
+  awaitingPolicy: false,
 };
 
 function post(event: WorkerEvent): void {
@@ -415,6 +443,13 @@ function egoArrived(engine: EngineState): boolean {
  * the arrival and the result. Running those steps back to back produces
  * byte-identical engine state — same steps, same order, same result, same
  * comparison — so only the delay is deleted.
+ *
+ * "Skip to end" (final polish pass) is the OTHER way a run's end arrives, and it
+ * deliberately does not come through here: a skip advances the paced loop at a
+ * coverage-safe pace instead (see SKIP_STEPS_PER_TICK), because a stretch longer
+ * than one policy's maximum hold cannot be simulated back to back without
+ * outrunning the service that governs it. This tail therefore stays what it
+ * always was — the arrival's — and stays the only unpaced stretch in the app.
  */
 function finishHorizon(engine: EngineState, untilMs: number, control: JevRunControl | null): void {
   while (engine.traffic.timeMs < untilMs) {
@@ -546,6 +581,10 @@ async function buildRun(config: RunConfig): Promise<void> {
   state.manualIncidentSequence = 0;
   state.snapshotSequence = 0;
   state.invalidated = false;
+  // A skip asked for on the way out of the previous run must not finish this
+  // new one; the SPEED is a viewing preference and survives the rebuild.
+  state.skipToEnd = false;
+  state.awaitingPolicy = false;
   capabilitySignature = null;
   postIncidentCapabilities();
   post({
@@ -621,7 +660,11 @@ async function beginRun(buildToken: number): Promise<void> {
   const control = jevRunControl(engine);
   if (control !== null) {
     post({ type: "JEV_STARTING", resuming: false });
+    // No simulated time passes while this gate is open, so a skip asked for now
+    // has nothing to finish: it is refused, not deferred into a fabricated run.
+    state.awaitingPolicy = true;
     const started = await control.start(controllerObservation(engine));
+    state.awaitingPolicy = false;
     if (buildToken !== state.buildToken) {
       return; // a newer build superseded this run
     }
@@ -696,7 +739,9 @@ async function gateSwitchedController(engine: EngineState): Promise<void> {
   state.running = false;
   clearTimer();
   post({ type: "JEV_STARTING", resuming: true });
+  state.awaitingPolicy = true;
   const started = await control.start(controllerObservation(engine));
+  state.awaitingPolicy = false;
   if (state.engine !== engine || state.invalidated) {
     return; // superseded by a newer build, or the run was stopped meanwhile
   }
@@ -740,13 +785,31 @@ function runTick(): void {
     return;
   }
   try {
-    for (let step = 0; step < PLAYBACK_STEPS_PER_TICK; step += 1) {
+    /*
+     * How many engine steps this tick runs.
+     *
+     * "Skip to end" advances the run at SKIP_STEPS_PER_TICK — the fastest pace
+     * the run's own policy coverage allows, and not one step faster, because a
+     * skipped run still has to be an honest Jev run (see the constant). The
+     * run keeps the PACED loop, the same refresh grid and the same wall-clock
+     * service budget: the skipped stretch is simulated by exactly the steps a
+     * watched run takes, it still asks for a policy whenever the schedule and
+     * the gate allow one, and it reports the time it spent on a HELD policy.
+     * That is what lets a skip finish a run (and hand over its payoff) instead
+     * of outrunning the model into an invalidation. 3× just multiplies the
+     * normal playback; nothing else changes.
+     */
+    const watchedSteps = PLAYBACK_STEPS_PER_TICK * state.speed;
+    const stepsPerTick = state.skipToEnd
+      ? Math.max(SKIP_STEPS_PER_TICK, watchedSteps)
+      : watchedSteps;
+    for (let step = 0; step < stepsPerTick; step += 1) {
       stepEngine(engine);
       if (engine.traffic.timeMs >= config.durationMs) {
         break;
       }
     }
-    if (engine.traffic.timeMs < config.durationMs && egoArrived(engine)) {
+    if (!state.skipToEnd && engine.traffic.timeMs < config.durationMs && egoArrived(engine)) {
       // The trip is over. Publish the arrival frame FIRST — the UI must see the
       // car arrived before this thread turns to the tail — then simulate the
       // rest of the horizon back to back instead of pacing it out in real time.
@@ -830,6 +893,36 @@ function handleCommand(command: WorkerCommand): void {
     }
     case "PAUSE": {
       pause();
+      return;
+    }
+    case "SKIP_TO_END": {
+      if (!state.engine || !state.config || state.complete || state.invalidated) {
+        return; // nothing in flight to finish
+      }
+      if (state.awaitingPolicy) {
+        // The startup gate is open: not one simulated millisecond has passed, so
+        // there is nothing to skip. The run either starts (and can then be
+        // skipped) or reports why it could not.
+        return;
+      }
+      // The run is advanced to its horizon at SKIP_STEPS_PER_TICK through the
+      // ordinary paced loop, so the skipped stretch still asks on the run's own
+      // refresh schedule and still obeys the wall-clock service budget: the run
+      // can therefore COMPLETE (with its payoff) rather than outrun the model
+      // and be invalidated. A paused run is finished too: skipping IS the request
+      // to end this run, so the clock resumes for it.
+      state.skipToEnd = true;
+      if (!state.running) {
+        start();
+      }
+      return;
+    }
+    case "SET_SPEED": {
+      // Pacing, and only pacing: the engine reads no wall clock, so the same run
+      // watched 3× faster runs the same steps in the same order. Nothing about
+      // the world, the scenario or the service budget changes here — the budget
+      // is wall-clock paced and will legitimately hold more of a 3× run.
+      state.speed = command.speed;
       return;
     }
     case "RESET": {

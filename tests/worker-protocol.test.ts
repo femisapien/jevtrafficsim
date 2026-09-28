@@ -4,6 +4,7 @@ import {
   LIVE_RUN_HORIZON_MS,
   nextSeed,
   parseWorkerCommand,
+  PLAYBACK_SPEEDS,
   PLAYBACK_STEPS_PER_TICK,
   SIM_TICK_MS,
 } from "@/worker/protocol";
@@ -79,6 +80,21 @@ describe("worker protocol validation", () => {
     expect(() => parseWorkerCommand("START")).toThrow(RangeError);
   });
 
+  it("accepts the two run controls and validates the speed", () => {
+    // "Skip to end" (final polish pass) carries no arguments: which run it
+    // applies to is the one the worker is holding.
+    expect(parseWorkerCommand({ type: "SKIP_TO_END" })).toEqual({ type: "SKIP_TO_END" });
+    // The speed is one of exactly two states, and anything else is refused
+    // rather than rounded into one.
+    for (const speed of PLAYBACK_SPEEDS) {
+      expect(parseWorkerCommand({ type: "SET_SPEED", speed })).toEqual({ type: "SET_SPEED", speed });
+    }
+    for (const speed of [0, 2, 4, -3, 1.5, "3", null, undefined]) {
+      expect(() => parseWorkerCommand({ type: "SET_SPEED", speed })).toThrow(RangeError);
+    }
+    expect(() => parseWorkerCommand({ type: "SET_SPEED" })).toThrow(RangeError);
+  });
+
   it("validates RESET modes", () => {
     expect(parseWorkerCommand({ type: "RESET", mode: "same-seed" })).toEqual({
       type: "RESET",
@@ -129,6 +145,13 @@ describe("worker protocol validation", () => {
     expect(PLAYBACK_STEPS_PER_TICK).toBeGreaterThan(1);
     expect(PLAYBACK_STEPS_PER_TICK * SIM_TICK_MS).toBeLessThanOrEqual(1_000);
     expect(LIVE_RUN_HORIZON_MS).toBe(600_000);
+    // The speed control's two states (final polish pass): normal, and 3× the
+    // engine steps per real tick. The FRAME cadence is untouched — still one
+    // frame per real tick — so the renderer's interpolation window is still
+    // SIM_TICK_MS and 3× is more simulated distance per frame, not a different
+    // animation clock.
+    expect([...PLAYBACK_SPEEDS]).toEqual([1, 3]);
+    expect(PLAYBACK_STEPS_PER_TICK * PLAYBACK_SPEEDS[1] * SIM_TICK_MS).toBe(2_400);
   });
 
   it("advances seeds in uint32 space deterministically", () => {
