@@ -118,7 +118,35 @@ describe("how fast a run is watched cannot change what it produces", () => {
    * remaining horizon back to back (skip / arrival tail).
    */
   it("produces an identical world for 1, 8, 24 and unpaced steps per tick", () => {
-    const TOTAL_STEPS = 1_500; // 150 s of simulated time
+    /**
+     * 66 s of simulated time. The property is about GROUPING, and nothing in
+     * the engine is told which grouping called it, so the window only has to be
+     * long enough that the four worlds are the product of the run's recurring
+     * work rather than a trivial prefix, and that the payoff they are compared
+     * on carries real trip accounting rather than zeros. 66 s is that point and
+     * no further: the demand has put ~550 vehicles on ~450 occupied roads, the
+     * signals have cycled many times, queueing and drain have both happened,
+     * the ego is two of its thirty-four roads into the trip, and the first
+     * background arrival (step 501, t = 50.1 s) is behind us. The two guards
+     * below hold this window to that job.
+     *
+     * 660 is deliberately NOT a multiple of 8 or 24, so the final group of each
+     * paced grouping is partial — the worker's own last tick before its horizon
+     * is a partial group too, and a grouping bug that only shows at a short
+     * final group would otherwise be invisible here.
+     *
+     * Measured on this box, four drives of the same assertion: 4 × 660 steps ≈
+     * 2.3 s, against 4 × 1_500 ≈ 7.0 s that the identical assertion used to
+     * cost — the price of the window is ~quadratic, because the fleet grows
+     * with it. Both windows return the same four identical worlds, so the extra
+     * 84 s of simulated time bought 3× the CPU and no extra proof.
+     *
+     * Why the cost matters at all: this file runs beside the 600 s Chicago
+     * workloads, on a runner measured 2.3× slower than this box on the same
+     * test (chicago-trips: 70.9 s there, 30.6 s here), under a 15 s hang guard.
+     * 7.0 s local had no headroom left there; 2.3 s does.
+     */
+    const TOTAL_STEPS = 660; // 66 s of simulated time, 27 full 3× ticks + a partial one
     const drive = (stepsPerTick: number): { signature: string; result: ChallengeResult } => {
       const { engine, step, result } = scenarioDrive();
       let done = 0;
@@ -135,6 +163,15 @@ describe("how fast a run is watched cannot change what it produces", () => {
     const fast = drive(PLAYBACK_STEPS_PER_TICK * PLAYBACK_SPEEDS[1]);
     const single = drive(1);
     const unpaced = drive(TOTAL_STEPS);
+
+    // The window is load-bearing, not decoration: "the pacing cannot change the
+    // payoff" would be a claim about zeros if the worlds compared were empty or
+    // no vehicle had finished a trip. Measured at this window: 552 vehicles in
+    // the city and 3 completed trips, so the floors leave room for the demand
+    // model to move while still failing if the window is cut to a prefix that
+    // proves nothing.
+    expect(paced.result.city.activeVehicles).toBeGreaterThan(400);
+    expect(paced.result.city.completedTrips).toBeGreaterThan(0);
 
     expect(fast.signature).toBe(paced.signature);
     expect(single.signature).toBe(paced.signature);
