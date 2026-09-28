@@ -262,14 +262,18 @@ describe("Chicago Metro performance", () => {
       // heavier per live vehicle than it was when the 1.25 above was calibrated:
       // at 8 000 the padding is only ~3% of a step, so a partial reintroduction of
       // the #40 sweeps lands inside this test's noise band (measured: 1.14×).
-      // Measured on this machine, 300-tick medians, n=2 runs:
-      //   post-#40 code          1.66× / 1.67×
-      //   full pre-#40 shape     2.87×  (per-tick metrics, approach stats,
-      //   observations and arrival accounting all sweeping canonical history)
-      // 2.1 is the geometric middle of those two excesses (+66% / +187%), so the
-      // bound tolerates a ±68% machine variation in per-history-scan cost on
-      // either side while still failing the regression by 36% of its own excess.
-      expect(growthHard).toBeLessThan(2.1);
+      // Measured, 300-tick medians of the same arms:
+      //   post-#40 code   1.61–1.67× here, 2.28× on the CI runner
+      //   pre-#40 shape   2.87×  (per-tick metrics, approach stats, observations
+      //   and arrival accounting all sweeping canonical history again)
+      // The gap between those two machines is real and is what sets the bound: a
+      // padded arm pays per history ENTRY scanned, and a runner with slower memory
+      // pays ~1.9× more of that per step than this workstation does, so a bound
+      // tuned only to the local reading (1.66) flaps on CI. 2.6 sits between the
+      // CI's healthy 2.28 and the pre-#40 shape's 2.87: ~14% above the slowest
+      // healthy reading seen, ~10% below the regression, with the regression
+      // deterministic (2.87 ± 5% of run-to-run noise) so it still fails reliably.
+      expect(growthHard).toBeLessThan(2.6);
     },
   );
 
