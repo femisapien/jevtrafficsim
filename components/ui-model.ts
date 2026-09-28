@@ -860,11 +860,11 @@ export function causeReason(cause: JevCause | null | undefined): string | null {
     case "timeout":
       return "the model did not answer in time";
     case "rate-limited":
-      return "the model gateway rate-limited the request";
+      return "the model service rate-limited the request";
     case "upstream-error":
-      return "the model gateway returned an error";
+      return "the model service returned an error";
     case "rejected":
-      return "the model gateway refused the request";
+      return "the model service refused the request";
     case "unreachable":
       return "the model could not be reached";
     case "not-configured":

@@ -35,6 +35,13 @@
  *     (`/tmp/jev-relay-probe-021825/`: 30 requests, 19 upstream rate limits).
  *     One credential, one window, whether the request came from a script or
  *     from a browser;
+ *   - production's live path no longer runs through that gateway: it is
+ *     TypeSafe's own API, directly (`JEV_BACKEND=typesafe`, credential
+ *     TYPESAFE_API_KEY, held only by the relay). The one bounded probe of the
+ *     direct API carried NO rate-limit metadata at all, so the schedule keeps
+ *     its conservative measured shape (jev/scheduler.ts) until a direct refusal
+ *     teaches something. The scope below is unchanged — one credential per
+ *     deployment — because the credential still lives on the server;
  *   - the window is shared with the provider's other callers and moves with
  *     provider demand (12 requests at 5.3 s spacing passed with zero 429s in one
  *     quiet minute; 12.7/min took 10 rejections a minute later). That is why one

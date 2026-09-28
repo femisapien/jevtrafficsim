@@ -43,6 +43,8 @@ const TOKEN = "token-that-must-never-appear-anywhere";
 const STANDARD_KEY = "standard-gateway-key-that-must-never-appear-anywhere";
 /** The deployment's own request-scoped OIDC token, as the platform would mint it. */
 const OIDC_TOKEN = "deployment-oidc-token-that-must-never-appear-anywhere";
+/** The direct TypeSafe credential the production live path uses. */
+const TYPESAFE_KEY = "typesafe-key-that-must-never-appear-anywhere";
 
 const originalEnv = {
   AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY,
@@ -50,6 +52,8 @@ const originalEnv = {
   JEV_TOKEN: process.env.JEV_TOKEN,
   JEV_TIMEOUT_MS: process.env.JEV_TIMEOUT_MS,
   JEV_MODEL: process.env.JEV_MODEL,
+  JEV_BACKEND: process.env.JEV_BACKEND,
+  TYPESAFE_API_KEY: process.env.TYPESAFE_API_KEY,
 };
 const originalFetch = globalThis.fetch;
 
@@ -58,6 +62,8 @@ function configure(): void {
   process.env.JEV_TOKEN = TOKEN;
   delete process.env.JEV_MODEL;
   delete process.env.AI_GATEWAY_API_KEY;
+  delete process.env.JEV_BACKEND;
+  delete process.env.TYPESAFE_API_KEY;
 }
 
 function request(overrides: Partial<JevPolicyRequest> = {}): JevPolicyRequest {
@@ -160,6 +166,8 @@ afterEach(() => {
   restore("JEV_TOKEN", originalEnv.JEV_TOKEN);
   restore("JEV_TIMEOUT_MS", originalEnv.JEV_TIMEOUT_MS);
   restore("JEV_MODEL", originalEnv.JEV_MODEL);
+  restore("JEV_BACKEND", originalEnv.JEV_BACKEND);
+  restore("TYPESAFE_API_KEY", originalEnv.TYPESAFE_API_KEY);
   globalThis.fetch = originalFetch;
 });
 
@@ -567,6 +575,216 @@ describe("gateway credential lane (production auth contract)", () => {
     const text = await response.text();
     expect(text).not.toContain(TOKEN);
     expect(text).not.toContain("not allowed");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* The direct TypeSafe backend: the production live path, and what it must not */
+/* -------------------------------------------------------------------------- */
+
+describe("direct TypeSafe backend (production live path)", () => {
+  /**
+   * A direct-API-shaped answer for every question the request asked, in the
+   * shape the live probe returned: a choice, a probability for each option, a
+   * confidence, plus usage fields this codebase does not parse.
+   */
+  function stubTypesafeFetch(seen: { url: string; authorization: string | null; body: string }[]): void {
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      const raw = String(init.body);
+      seen.push({
+        url: String(url),
+        authorization: new Headers(init.headers).get("authorization"),
+        body: raw,
+      });
+      const parsed = JSON.parse(raw) as { questions: Record<string, unknown> };
+      const answers = Object.fromEntries(
+        Object.keys(parsed.questions).map((id) => {
+          const choice = id === "hint" ? "hold-longer" : id === "pressure" ? "assertive" : "high";
+          return [id, { type: "choice", choice, confidence: 0.6, probabilities: { [choice]: 0.7 } }];
+        }),
+      );
+      return new Response(
+        JSON.stringify({ model: "jev-1.13.0", answers, usage: { input_tokens: 10, output_tokens: 5 } }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+  }
+
+  it("selects the direct lane by name: TypeSafe endpoint, jev-latest, only the TypeSafe key", async () => {
+    process.env.JEV_BACKEND = "typesafe";
+    process.env.TYPESAFE_API_KEY = TYPESAFE_KEY;
+    // Stale gateway configuration, exactly the shape production carried before
+    // the migration: it must neither win nor travel.
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.JEV_TOKEN = TOKEN;
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    const seen: { url: string; authorization: string | null; body: string }[] = [];
+    stubTypesafeFetch(seen);
+
+    const response = await post(request());
+    expect(response.status).toBe(200);
+    // Exactly one request, to TypeSafe's own endpoint, with the direct model.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(seen[0].authorization).toBe(`Bearer ${TYPESAFE_KEY}`);
+    const upstream = JSON.parse(seen[0].body) as { model: string; questions: Record<string, unknown> };
+    expect(upstream.model).toBe("jev-latest");
+    // Neither gateway credential, nor the legacy token, rides the request — and
+    // the deployment's OIDC token is not even consulted.
+    expect(seen[0].body).not.toContain(STANDARD_KEY);
+    expect(seen[0].body).not.toContain(TOKEN);
+    expect(vi.mocked(getVercelOidcTokenSync)).not.toHaveBeenCalled();
+    // The backend and the lane are named; no credential appears anywhere.
+    expect(response.headers.get("x-jev-backend")).toBe("typesafe-direct");
+    expect(response.headers.get("x-jev-auth")).toBe("api-key");
+    const text = await response.text();
+    expect(text).not.toContain(TYPESAFE_KEY);
+    for (const [, value] of response.headers) {
+      expect(value).not.toContain(TYPESAFE_KEY);
+    }
+    // And the existing strict validation still produced a bounded policy.
+    expect((JSON.parse(text) as { policy: { hint: string } }).policy.hint).toBe("hold-longer");
+  });
+
+  it("reads the environment as the direct lane and nothing else", () => {
+    process.env.JEV_BACKEND = "typesafe";
+    process.env.TYPESAFE_API_KEY = TYPESAFE_KEY;
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    const environment = readJevEnvironment(OIDC_TOKEN);
+    expect(environment?.backend).toBe("typesafe-direct");
+    expect(environment?.token).toBe(TYPESAFE_KEY);
+    expect(environment?.token).not.toBe(STANDARD_KEY);
+    expect(environment?.token).not.toBe(OIDC_TOKEN);
+    expect(environment?.authMode).toBe("api-key");
+    expect(environment?.gateway).toBeNull();
+    expect(environment?.endpoint).toBeNull();
+  });
+
+  it("fails closed when the selected backend has no key, and never falls through to the gateway", async () => {
+    process.env.JEV_BACKEND = "typesafe";
+    delete process.env.TYPESAFE_API_KEY;
+    // A fully armed gateway lane must not catch the request instead.
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const response = await post(request());
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toMatch(/not configured/);
+    expect(calls).toBe(0);
+  });
+
+  it("fails closed on a backend name it does not recognise", async () => {
+    process.env.JEV_BACKEND = "gateway";
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const response = await post(request());
+    expect(response.status).toBe(503);
+    expect(calls).toBe(0);
+  });
+
+  it("classifies a refused credential separately from a rate limit and a 5xx", async () => {
+    process.env.JEV_BACKEND = "typesafe";
+    process.env.TYPESAFE_API_KEY = TYPESAFE_KEY;
+    const cases: readonly [number, Record<string, string>, string][] = [
+      // 401 and 403 are the same bounded class ("rejected"), and it is NOT the
+      // rate-limit class nor the upstream-error class.
+      [401, {}, "rejected"],
+      [403, {}, "rejected"],
+      [429, { "retry-after": "40" }, "rate-limited"],
+      [500, {}, "upstream-error"],
+      [503, {}, "upstream-error"],
+    ];
+    for (const [upstreamStatus, headers, reason] of cases) {
+      globalThis.fetch = (async () =>
+        new Response(`upstream said: ${TYPESAFE_KEY} is revoked`, {
+          status: upstreamStatus,
+          headers,
+        })) as unknown as typeof fetch;
+      const response = await post(request());
+      expect(response.status, `upstream ${upstreamStatus}`).toBe(502);
+      expect(response.headers.get("x-jev-reason"), `upstream ${upstreamStatus}`).toBe(reason);
+      expect(response.headers.get("x-jev-backend")).toBe("typesafe-direct");
+      if (upstreamStatus === 429) {
+        // The pause TypeSafe named crosses the relay as a bounded number.
+        expect(response.headers.get("x-jev-retry-after-ms")).toBe("40000");
+      } else {
+        expect(response.headers.get("x-jev-retry-after-ms")).toBeNull();
+      }
+      const text = await response.text();
+      expect(text).not.toContain(TYPESAFE_KEY);
+      expect(text).not.toContain("revoked");
+    }
+  });
+
+  it("logs one bounded reason naming the direct transport, never the key", async () => {
+    process.env.JEV_BACKEND = "typesafe";
+    process.env.TYPESAFE_API_KEY = TYPESAFE_KEY;
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      globalThis.fetch = (async () =>
+        new Response(`upstream said: ${TYPESAFE_KEY} is revoked`, {
+          status: 500,
+        })) as unknown as typeof fetch;
+      const response = await post(request());
+      expect(response.status).toBe(502);
+    } finally {
+      console.error = originalError;
+    }
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain("jev typesafe-direct responded 500");
+    expect(logged[0]).toContain("api-key");
+    expect(logged[0]).not.toContain(TYPESAFE_KEY);
+    expect(logged[0]).not.toContain("revoked");
+    // The direct transport's sentences are reportable, and bounded by the same
+    // regex the gateway lane's are.
+    expect(failureReason(new Error("jev typesafe-direct responded 403"))).toBe(
+      "jev typesafe-direct responded 403",
+    );
+  });
+
+  it("never sends the TypeSafe key to the gateway lane", async () => {
+    delete process.env.JEV_BACKEND;
+    process.env.JEV_MODEL = "typesafe-ai/jev";
+    process.env.AI_GATEWAY_API_KEY = STANDARD_KEY;
+    process.env.TYPESAFE_API_KEY = TYPESAFE_KEY;
+    const seen: { url: string; authorization: string | null; body: string }[] = [];
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      const raw = String(init.body);
+      seen.push({
+        url: String(url),
+        authorization: new Headers(init.headers).get("authorization"),
+        body: raw,
+      });
+      const parsed = JSON.parse(raw) as { questions: Record<string, unknown> };
+      const answers = Object.fromEntries(
+        Object.keys(parsed.questions).map((id) => [id, { type: "choice", choice: "steady", confidence: 0.6 }]),
+      );
+      return new Response(JSON.stringify({ answers }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const response = await post(request());
+    expect(response.status).toBe(200);
+    expect(seen[0].url).toBe("https://ai-gateway.vercel.sh/v1/evaluate");
+    expect(seen[0].authorization).toBe(`Bearer ${STANDARD_KEY}`);
+    expect(seen[0].body).not.toContain(TYPESAFE_KEY);
+    // The gateway lane still names itself truthfully.
+    expect(response.headers.get("x-jev-backend")).toBe("ai-gateway");
   });
 });
 

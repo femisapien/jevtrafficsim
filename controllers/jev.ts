@@ -416,14 +416,20 @@ function countActiveVehicles(traffic: TrafficState): number {
 }
 
 export function createJevController(options: JevControllerOptions): JevController {
-  // Which source this controller's policies come from, decided once from what it
-  // was actually wired with — never taken from a caller's label.
-  const adapter: JevAdapter =
+  // Which source this controller's policies come from, decided from what it was
+  // actually wired with — never taken from a caller's label. Read at meta()
+  // time, not construction time: a relay client cannot know its backend until
+  // the relay has answered, and the name the relay reported (`x-jev-backend`)
+  // outranks the client's own static id. The id is the fallback for clients
+  // that ARE their own backend (mock, http, the direct transports).
+  const adapterNow = (): JevAdapter =>
     options.mode === "replay"
       ? "replay"
       : options.client === null
         ? "unconfigured"
-        : (adapterFromId(options.client.id) ?? "schema-service");
+        : (adapterFromId(options.client.backend?.() ?? null) ??
+          adapterFromId(options.client.id) ??
+          "schema-service");
   const runtime: JevRuntime = createJevPolicyRuntime({
     client: options.mode === "replay" ? null : options.client,
     scenarioFingerprint: options.scenarioFingerprint,
@@ -473,7 +479,7 @@ export function createJevController(options: JevControllerOptions): JevControlle
       return {
         kind: "jev",
         mode: status.mode,
-        adapter,
+        adapter: adapterNow(),
         recorded: options.trace?.recorded ?? null,
         source: status.source,
         start: status.start,

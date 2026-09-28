@@ -87,6 +87,8 @@ describe("adapter vocabulary", () => {
   it("maps every client id the codebase can produce, and nothing else", () => {
     expect(adapterFromId("mock")).toBe("mock");
     expect(adapterFromId("gateway")).toBe("gateway");
+    expect(adapterFromId("typesafe-direct")).toBe("typesafe-direct");
+    expect(adapterFromId("ai-gateway")).toBe("gateway");
     expect(adapterFromId("live")).toBe("schema-service");
     expect(adapterFromId("replay")).toBe("replay");
     expect(adapterFromId("something-else")).toBeNull();
@@ -95,6 +97,7 @@ describe("adapter vocabulary", () => {
 
   it("says which adapters involve a model, and which cannot", () => {
     expect(adapterInvolvesModel("gateway")).toBe(true);
+    expect(adapterInvolvesModel("typesafe-direct")).toBe(true);
     expect(adapterInvolvesModel("schema-service")).toBe(true);
     expect(adapterInvolvesModel("mock")).toBe(false);
     expect(adapterInvolvesModel("replay")).toBe(false);
@@ -104,6 +107,7 @@ describe("adapter vocabulary", () => {
   it("labels every adapter with the same token the CLI prints", () => {
     expect(provenanceLabel("mock")).toBe("jev-mock");
     expect(provenanceLabel("gateway")).toBe("jev-gateway");
+    expect(provenanceLabel("typesafe-direct")).toBe("jev-typesafe-direct");
     expect(provenanceLabel("schema-service")).toBe("jev-schema-service");
     expect(provenanceLabel("replay")).toBe("jev-replay");
   });

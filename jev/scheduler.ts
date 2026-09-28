@@ -48,6 +48,21 @@
  *      rejection, and (b) how far apart its own successful policies actually
  *      landed. This module uses both and invents no third.
  *
+ * ## The direct TypeSafe transport (the production live path)
+ *
+ * Every number above was measured against the Vercel AI Gateway. Production now
+ * reaches TypeSafe's own API DIRECTLY (`JEV_BACKEND=typesafe`, POST
+ * https://api.typesafe.ai/v1/systemone, model `jev-latest`, credential
+ * TYPESAFE_API_KEY; see jev/typesafe.ts), and the direct API was probed ONCE
+ * with the production request shape: a 200 carried NO rate-limit metadata (no
+ * `retry-after`, no `x-ratelimit-*`), and no refusal was observed. There is
+ * therefore nothing to re-derive a cadence from, and this module does not guess
+ * upward: the conservative schedule below is PRESERVED UNCHANGED for the direct
+ * path — 4 requests per trailing 60 s, 15 s spacing, which is strictly tighter
+ * than the gateway's advertised 5-per-window — and a direct refusal's
+ * `retry-after` (if the service ever names one) is honoured by the same rule.
+ * Re-tuning is a product decision that waits for a measurement.
+ *
  * ## The rule
  *
  * Never spend the whole advertised allowance, and never answer a refusal with a

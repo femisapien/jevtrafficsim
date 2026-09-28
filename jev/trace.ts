@@ -51,13 +51,16 @@ export type JevPolicySource = "live" | "replay" | "waiting" | "invalidated";
 /**
  * Which policy source a run actually used (Issue #38).
  *
- *   mock           deterministic stand-in: no network, no credential, no model
- *   gateway        TypeSafe AI's jev through the Vercel AI Gateway
- *   schema-service a service speaking the Jev policy schema (JEV_ENDPOINT)
- *   replay         an offline recorded trace, zero network calls
- *   unconfigured   no client at all: the run was the Adaptive fallback throughout
+ *   mock            deterministic stand-in: no network, no credential, no model
+ *   gateway         TypeSafe AI's jev through the Vercel AI Gateway
+ *   typesafe-direct TypeSafe AI's jev reached DIRECTLY (POST /v1/systemone with
+ *                   TYPESAFE_API_KEY) — the production live path. The relay
+ *                   names it (`x-jev-backend`) and a browser run records it.
+ *   schema-service  a service speaking the Jev policy schema (JEV_ENDPOINT)
+ *   replay          an offline recorded trace, zero network calls
+ *   unconfigured    no client at all: the run was the Adaptive fallback throughout
  */
-export type JevAdapter = "mock" | "gateway" | "schema-service" | "replay" | "unconfigured";
+export type JevAdapter = "mock" | "gateway" | "typesafe-direct" | "schema-service" | "replay" | "unconfigured";
 
 /** The stand-in for an adapter string that arrived from outside this codebase. */
 export function adapterFromId(id: string | null | undefined): JevAdapter | null {
@@ -66,6 +69,12 @@ export function adapterFromId(id: string | null | undefined): JevAdapter | null 
       return "mock";
     case "gateway":
       return "gateway";
+    // The relay's own name for the gateway lane; the adapter vocabulary's word
+    // for it is "gateway".
+    case "ai-gateway":
+      return "gateway";
+    case "typesafe-direct":
+      return "typesafe-direct";
     case "live":
     case "http":
     case "schema-service":
@@ -299,7 +308,7 @@ function parseRecorded(value: unknown): JevTraceRecordedRun | null | string {
   const raw = value as Record<string, unknown>;
   const adapter = adapterFromId(typeof raw.adapter === "string" ? raw.adapter : null);
   if (adapter === null) {
-    return "trace.recorded.adapter must be one of mock, gateway, schema-service, replay";
+    return "trace.recorded.adapter must be one of mock, gateway, typesafe-direct, schema-service, replay";
   }
   const numbers: Record<string, number> = {};
   for (const field of ["accepted", "rejected", "refreshes", "expiries", "liveMs", "fallbackMs"] as const) {

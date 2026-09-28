@@ -55,6 +55,26 @@ export const JEV_RETRY_AFTER_HEADER = "x-jev-retry-after-ms";
  * one the gateway refused.
  */
 export const JEV_AUTH_HEADER = "x-jev-auth";
+/**
+ * WHICH backend the relay used to serve a request, as a name from a closed
+ * vocabulary: `typesafe-direct` (TypeSafe AI's own /v1/systemone — the
+ * production live path), `ai-gateway` (the Vercel AI Gateway lane, kept for
+ * deployments that still select it) or `schema-service` (a service speaking the
+ * Jev policy schema directly). No endpoint, model or credential ever rides with
+ * it, which is what lets a browser-side client — and a production probe — know
+ * which backend answered without any part of the service credential being
+ * visible. The relay sets it on successes and refusals alike.
+ */
+export const JEV_BACKEND_HEADER = "x-jev-backend";
+
+export const JEV_BACKENDS = ["typesafe-direct", "ai-gateway", "schema-service"] as const;
+
+export type JevBackendName = (typeof JEV_BACKENDS)[number];
+
+/** True when the value is one of the bounded backend names. */
+export function isJevBackendName(value: unknown): value is JevBackendName {
+  return typeof value === "string" && (JEV_BACKENDS as readonly string[]).includes(value);
+}
 
 /**
  * How a policy request failed, in the smallest vocabulary that can be reported
@@ -214,6 +234,14 @@ export interface JevClient {
    * keeps exactly one request in flight.
    */
   answerNotes?(): JevAnswerNotes | null;
+  /**
+   * The backend the RELAY named for the most recent answer, when it named one
+   * (see JEV_BACKENDS). Optional: a server-side client IS its backend and does
+   * not need to report it, and a deterministic stand-in has none. Null until a
+   * relay has answered something; the controller reads it so a completed run
+   * records the backend that actually served it.
+   */
+  backend?(): JevBackendName | null;
 }
 
 /**
@@ -370,9 +398,12 @@ export function createRelayJevClient(options: RelayJevClientOptions = {}): JevCl
   const url = options.url ?? JEV_RELAY_PATH;
   const timeoutMs = options.timeoutMs ?? JEV_DEFAULT_TIMEOUT_MS;
   let notes: JevAnswerNotes | null = null;
+  /** The backend the relay named on its most recent answer, or null. */
+  let backend: JevBackendName | null = null;
   return {
     id: "relay",
     answerNotes: () => notes,
+    backend: () => backend,
     requestPolicy: async (request) => {
       notes = null;
       let response: Response;
@@ -391,6 +422,14 @@ export function createRelayJevClient(options: RelayJevClientOptions = {}): JevCl
           failure,
           failure === "timeout" ? "jev relay request timed out" : "jev relay unreachable",
         );
+      }
+      // The relay names the backend it served the request from — on successes
+      // and refusals alike — so the run can record the backend that actually
+      // answered. A name from a closed vocabulary, never anything about the
+      // credential; an answer that carries none leaves the last name standing.
+      const named = response.headers.get(JEV_BACKEND_HEADER);
+      if (isJevBackendName(named)) {
+        backend = named;
       }
       const body = (await response.json().catch(() => null)) as
         | { policy?: unknown; error?: string; clamped?: unknown; dropped?: unknown }

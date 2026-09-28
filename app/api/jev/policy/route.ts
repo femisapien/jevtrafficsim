@@ -6,12 +6,23 @@
  * keeps the secret out of the client bundle, out of the worker payload, out of
  * browser state and out of logs:
  *
- *   - the credential is the explicitly configured AI Gateway API key whenever
- *     one exists — `AI_GATEWAY_API_KEY` first, then `JEV_TOKEN` (kept for
- *     backward compatibility) — and the deployment's request-scoped Vercel OIDC
- *     token for AI Gateway ONLY as the fallback when no explicit key is set.
- *     Exactly one credential is ever used, and which LANE it was travels as a
- *     name (`authMode`, `x-jev-auth`), never as a value;
+ *   - the production backend is TypeSafe AI's own API, directly
+ *     (`JEV_BACKEND=typesafe` -> POST https://api.typesafe.ai/v1/systemone,
+ *     model `jev-latest`), reached with `TYPESAFE_API_KEY` and nothing else.
+ *     The older lanes remain selectable but inert unless configured: the Vercel
+ *     AI Gateway (the explicitly configured AI Gateway API key whenever one
+ *     exists — `AI_GATEWAY_API_KEY` first, then `JEV_TOKEN` — and the
+ *     deployment's request-scoped Vercel OIDC token for AI Gateway ONLY as the
+ *     fallback when no explicit key is set), and a schema-speaking service
+ *     behind `JEV_ENDPOINT`. Exactly one credential is ever used per request,
+ *     no credential ever crosses lanes (no Vercel OIDC token, gateway key or
+ *     JEV_TOKEN is sent to TypeSafe; the TypeSafe key is never sent to the
+ *     gateway), and which LANE it was travels as a name (`authMode`,
+ *     `x-jev-auth`), never as a value;
+ *   - which BACKEND served the request travels as a name too (`x-jev-backend`,
+ *     a closed vocabulary: "typesafe-direct" | "ai-gateway" |
+ *     "schema-service"), on successes and refusals alike, so production can
+ *     prove the live path without any credential being visible;
  *   - the token travels in an Authorization header, never in a body, a URL or a
  *     message we log;
  *   - failure responses carry a status and a short message, never the service's
@@ -62,17 +73,20 @@ import { getVercelOidcTokenSync } from "@vercel/oidc";
 import {
   createHttpJevClient,
   JEV_AUTH_HEADER,
+  JEV_BACKEND_HEADER,
   JEV_CLAMPED_HEADER,
   JEV_DEFAULT_TIMEOUT_MS,
   JEV_DROPPED_HEADER,
   JEV_REASON_HEADER,
   JEV_RETRY_AFTER_HEADER,
   clientRetryAfterMs,
+  type JevBackendName,
   type JevClient,
   type JevClientFailure,
 } from "@/jev/client";
 import { JEV_GATEWAY_TIMEOUT_MS } from "@/jev/gateway";
 import { createGatewayJevClient, JEV_GATEWAY_ENDPOINT } from "@/jev/gateway";
+import { createTypesafeJevClient, JEV_TYPESAFE_TIMEOUT_MS } from "@/jev/typesafe";
 import { jevPolicyContext } from "@/jev/request";
 import { JEV_LIMITS, parseJevPolicy, validateJevPolicyRequest } from "@/jev/schema";
 import { callerIdentity } from "./caller";
@@ -214,30 +228,47 @@ export interface JevEnvironment {
   /** Which lane `token` came from: an explicit key, or the deployment's OIDC. */
   readonly authMode: JevAuthMode;
   readonly timeoutMs: number;
+  /**
+   * Which backend this configuration selected, as a NAME from the closed
+   * vocabulary in jev/client.ts. It rides every response (and every refusal)
+   * in `x-jev-backend`, which is how production proves which backend served a
+   * request — and how a browser run records it — with no credential visible.
+   */
+  readonly backend: JevBackendName;
+  /** Minimum usable answer confidence for a model lane; undefined = adapter default. */
+  readonly minConfidence: number | undefined;
   /** Set when this deployment talks to the Vercel AI Gateway. */
   readonly gateway: {
     readonly endpoint: string;
     readonly model: string;
-    /** Minimum usable answer confidence; undefined = the adapter's default. */
-    readonly minConfidence: number | undefined;
   } | null;
   /** Set when this deployment talks to a service speaking the policy schema. */
   readonly endpoint: string | null;
 }
 
 /**
- * Two supported backends, chosen by configuration alone:
+ * Three supported backends, chosen by configuration alone:
  *
+ *   JEV_BACKEND=typesafe -> TypeSafe AI's own API, DIRECTLY: POST
+ *                       https://api.typesafe.ai/v1/systemone, model
+ *                       `jev-latest`, credential `TYPESAFE_API_KEY`. This is
+ *                       the production live path. It outranks the selectors
+ *                       below, it reads TYPESAFE_API_KEY and nothing else, and
+ *                       no Vercel OIDC token, AI_GATEWAY_API_KEY or JEV_TOKEN
+ *                       is ever sent to TypeSafe's endpoint (nor the TypeSafe
+ *                       key to the gateway).
  *   JEV_MODEL set    -> TypeSafe AI's evaluation model through the Vercel AI
  *                       Gateway (its own URL; JEV_GATEWAY_URL overrides it for a
  *                       self-hosted proxy). One model, no fallbacks.
  *   JEV_ENDPOINT set -> a service that speaks the Jev policy schema directly
  *
- * The two are never mixed: JEV_MODEL selects the gateway and JEV_ENDPOINT is
- * ignored for it, so a deployment cannot accidentally send gateway-shaped
- * questions to a schema-speaking service. Only the configured backend is ever
- * called, and without a token there is no client at all — the route answers 503
- * rather than inventing a policy.
+ * The lanes are never mixed: an explicit backend selection outranks the lane
+ * selectors, JEV_MODEL selects the gateway and JEV_ENDPOINT is ignored for it,
+ * and a JEV_BACKEND value this codebase does not recognise fails CLOSED (503)
+ * rather than falling through to whichever lane an older variable still
+ * selects. Without a credential for the selected lane there is no client at
+ * all — the route answers 503 rather than inventing a policy or switching
+ * lanes behind the operator's back.
  */
 /** One named, optional confidence floor; the adapter owns the default. */
 function readMinConfidence(): number | undefined {
@@ -250,9 +281,9 @@ function readMinConfidence(): number | undefined {
 }
 
 /** The only error messages this route will ever log: status codes, a timeout. */
-const REPORTABLE_STATUS = /^jev (gateway|service|relay) responded \d{3}$/;
+const REPORTABLE_STATUS = /^jev (gateway|typesafe-direct|service|relay) responded \d{3}$/;
 /** The clients' own bounded sentences for a deadline or a missing connection. */
-const REPORTABLE_TRANSPORT = /^jev (gateway|service|relay) (request timed out|unreachable)$/;
+const REPORTABLE_TRANSPORT = /^jev (gateway|typesafe-direct|service|relay) (request timed out|unreachable)$/;
 
 /**
  * A bounded description of a failed policy request: safe to log, useless to an
@@ -317,6 +348,10 @@ export function failureClass(error: unknown): JevClientFailure {
  * `authMode` rides along as `x-jev-auth` whenever the lane is known: the
  * credential LANE as a name ("api-key" | "oidc"), never any part of the
  * credential itself.
+ *
+ * `backend` rides along as `x-jev-backend` for the same reason: the backend as
+ * a name ("typesafe-direct" | "ai-gateway" | "schema-service"), so a refusal
+ * still says which backend refused.
  */
 function refusal(
   status: number,
@@ -324,10 +359,14 @@ function refusal(
   failure: JevClientFailure,
   retryAfterMs: number | null = null,
   authMode: JevAuthMode | null = null,
+  backend: JevBackendName | null = null,
 ): Response {
   const headers: Record<string, string> = { [JEV_REASON_HEADER]: failure };
   if (authMode !== null) {
     headers[JEV_AUTH_HEADER] = authMode;
+  }
+  if (backend !== null) {
+    headers[JEV_BACKEND_HEADER] = backend;
   }
   if (retryAfterMs !== null) {
     headers[JEV_RETRY_AFTER_HEADER] = String(retryAfterMs);
@@ -358,18 +397,45 @@ export function configuredGatewayApiKey(): string | undefined {
 
 export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | null {
   const configuredToken = process.env.JEV_TOKEN?.trim();
-  // JEV_TIMEOUT_MS overrides both transports when an operator sets it. WITHOUT
-  // it each transport gets its own honest default: a live model call through the
-  // gateway takes seconds, a direct HTTP relay answers in milliseconds. The
-  // generic 4 s default used to be resolved here and then passed into the
-  // gateway client, where the transport's own 15 s default could never apply -
+  // JEV_TIMEOUT_MS overrides every transport when an operator sets it. WITHOUT
+  // it each transport gets its own honest default: a live model call takes
+  // seconds (the direct TypeSafe lane and the gateway lane both budget 15 s), a
+  // direct HTTP relay answers in milliseconds. The generic 4 s default used to
+  // be resolved here and then passed into the gateway client, where the
+  // transport's own 15 s default could never apply -
   // so slow-but-healthy calls were recorded as `timeout` fallbacks (issue #57).
   const configured = Number(process.env.JEV_TIMEOUT_MS);
   const overrideMs = Number.isFinite(configured) && configured > 0 ? configured : null;
 
+  // 1. An explicit backend selection. `typesafe` is the direct TypeSafe lane —
+  //    the production live path — and it reads TYPESAFE_API_KEY and nothing
+  //    else: no gateway key, no JEV_TOKEN, no Vercel OIDC token. A name this
+  //    codebase does not recognise fails CLOSED rather than falling through to
+  //    the gateway lane an older JEV_MODEL might still select.
+  const backend = process.env.JEV_BACKEND?.trim();
+  if (backend !== undefined && backend !== "") {
+    if (backend !== "typesafe") {
+      return null;
+    }
+    const typesafeKey = process.env.TYPESAFE_API_KEY?.trim();
+    if (typesafeKey === undefined || typesafeKey === "") {
+      return null;
+    }
+    return {
+      token: typesafeKey,
+      authMode: "api-key",
+      timeoutMs: overrideMs ?? JEV_TYPESAFE_TIMEOUT_MS,
+      backend: "typesafe-direct",
+      minConfidence: readMinConfidence(),
+      gateway: null,
+      endpoint: null,
+    };
+  }
+
   const model = process.env.JEV_MODEL?.trim();
   if (model) {
-    // The credential precedence, in one place and in this order:
+    // The credential precedence for the GATEWAY lane, in one place and in this
+    // order:
     //   1. the explicitly configured AI Gateway API key (AI_GATEWAY_API_KEY,
     //      then JEV_TOKEN) — when one exists, the deployment's own OIDC token is
     //      not even consulted;
@@ -387,10 +453,11 @@ export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | 
       token,
       authMode: apiKey === undefined ? "oidc" : "api-key",
       timeoutMs: overrideMs ?? JEV_GATEWAY_TIMEOUT_MS,
+      backend: "ai-gateway",
+      minConfidence: readMinConfidence(),
       gateway: {
         endpoint: process.env.JEV_GATEWAY_URL?.trim() || JEV_GATEWAY_ENDPOINT,
         model,
-        minConfidence: readMinConfidence(),
       },
       endpoint: null,
     };
@@ -405,20 +472,42 @@ export function readJevEnvironment(gatewayOidcToken?: string): JevEnvironment | 
     token: configuredToken,
     authMode: "api-key",
     timeoutMs: overrideMs ?? JEV_DEFAULT_TIMEOUT_MS,
+    backend: "schema-service",
+    minConfidence: undefined,
     gateway: null,
     endpoint,
   };
 }
 
+/**
+ * True when the configuration selects the AI Gateway lane — the only lane the
+ * deployment's OIDC token serves. An explicit backend selection (JEV_BACKEND)
+ * outranks it, so OIDC is not even read for any other lane.
+ */
+export function selectsGatewayLane(): boolean {
+  const backend = process.env.JEV_BACKEND?.trim();
+  if (backend !== undefined && backend !== "") {
+    return false;
+  }
+  return (process.env.JEV_MODEL?.trim() ?? "") !== "";
+}
+
 /** The one place a client is built from configuration. */
 export function jevClientFromEnvironment(environment: JevEnvironment): JevClient {
+  if (environment.backend === "typesafe-direct") {
+    return createTypesafeJevClient({
+      token: environment.token,
+      timeoutMs: environment.timeoutMs,
+      minConfidence: environment.minConfidence,
+    });
+  }
   if (environment.gateway) {
     return createGatewayJevClient({
       token: environment.token,
       endpoint: environment.gateway.endpoint,
       model: environment.gateway.model,
       timeoutMs: environment.timeoutMs,
-      minConfidence: environment.gateway.minConfidence,
+      minConfidence: environment.minConfidence,
     });
   }
   return createHttpJevClient({
@@ -429,13 +518,15 @@ export function jevClientFromEnvironment(environment: JevEnvironment): JevClient
 }
 
 export async function POST(request: Request): Promise<Response> {
-  // The deployment's OIDC token is the FALLBACK credential, so it is read only
-  // when no explicit AI Gateway API key is configured: with a key present, the
-  // request never depends on OIDC at all. (In Functions the platform rotates
-  // this token on each request and exposes it through request context, not a
-  // stable process.env value. The official helper reads that context.)
+  // The deployment's OIDC token is the FALLBACK credential for the GATEWAY
+  // lane, so it is read only when that lane is selected and no explicit AI
+  // Gateway API key is configured: with a key present — or with an explicit
+  // backend selection — the request never depends on OIDC at all. (In
+  // Functions the platform rotates this token on each request and exposes it
+  // through request context, not a stable process.env value. The official
+  // helper reads that context.)
   let gatewayOidcToken: string | undefined;
-  if (process.env.JEV_MODEL?.trim() && configuredGatewayApiKey() === undefined) {
+  if (selectsGatewayLane() && configuredGatewayApiKey() === undefined) {
     try {
       gatewayOidcToken = getVercelOidcTokenSync();
     } catch {
@@ -449,15 +540,15 @@ export async function POST(request: Request): Promise<Response> {
     return refusal(503, "jev is not configured", "not-configured");
   }
 
-  // Every refusal past this point knows which credential lane it is about, so
-  // each carries the lane as a name. The 503 above has no lane to report:
-  // nothing is configured.
+  // Every refusal past this point knows which credential lane and which
+  // backend it is about, so each carries both as names. The 503 above has no
+  // lane to report: nothing is configured.
   const deny = (
     status: number,
     error: string,
     failure: JevClientFailure,
     retryAfterMs: number | null = null,
-  ): Response => refusal(status, error, failure, retryAfterMs, environment.authMode);
+  ): Response => refusal(status, error, failure, retryAfterMs, environment.authMode, environment.backend);
 
   if (!firstParty(request)) {
     return deny(403, "cross-origin requests are not allowed", "rejected");
@@ -520,6 +611,9 @@ export async function POST(request: Request): Promise<Response> {
           // The lane, as a name — so production can prove which credential
           // asked without any part of it being visible.
           [JEV_AUTH_HEADER]: environment.authMode,
+          // The backend, as a name — so production can prove the live path
+          // (TypeSafe direct) without seeing a credential or a body.
+          [JEV_BACKEND_HEADER]: environment.backend,
         },
       },
     );

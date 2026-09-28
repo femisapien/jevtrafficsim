@@ -65,6 +65,12 @@ async function main(): Promise<void> {
   // the diagnostic simply reports nothing here.
   const lane = res.headers.get("x-jev-auth");
   console.log(`relay: auth lane ${lane ?? "not reported (deployment predates x-jev-auth)"}`);
+  // WHICH backend served the request: a name from the closed vocabulary
+  // ("typesafe-direct" | "ai-gateway" | "schema-service"), never a credential.
+  // The production live path is `typesafe-direct`; a deployment that predates
+  // the header simply reports nothing here.
+  const backend = res.headers.get("x-jev-backend");
+  console.log(`relay: backend ${backend ?? "not reported (deployment predates x-jev-backend)"}`);
   checkRelayAnswer(res.status, payload, request);
   console.log("relay: schema-valid bounded policy; no credential-shaped value");
 

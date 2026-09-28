@@ -159,9 +159,9 @@ export function refreshDetailForCause(cause: JevCause): string {
     case "timeout":
       return "the request's deadline passed before an answer arrived";
     case "rate-limited":
-      return "the model gateway rate-limited the request";
+      return "the model service rate-limited the request";
     case "upstream-error":
-      return "the model gateway returned an error";
+      return "the model service returned an error";
     case "rejected":
       return "the service refused the request";
     case "unreachable":

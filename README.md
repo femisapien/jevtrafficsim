@@ -108,7 +108,7 @@ browser
  ├─ worker/simulation.worker.ts   ALL simulation state: city, demand, engine, frames
  ├─ worker/baselines.worker.ts    Fixed + Adaptive for the same scenario (off-thread)
  └─ POST /api/jev/policy          the ONLY place the service credential exists
-        └─ jev/gateway.ts → Vercel AI Gateway (typesafe-ai/jev)
+        └─ jev/typesafe.ts → TypeSafe AI direct (POST /v1/systemone, jev-latest)
 ```
 
 - Simulation: framework-independent TypeScript in `sim/` (engine, traffic physics, signals,
@@ -132,19 +132,28 @@ pnpm dev                        # http://localhost:3000
 With no Jev configuration there is no Jev run: the startup gate reports the reason in
 plain words, and nothing is simulated in its place.
 
-On Vercel, set `JEV_MODEL=typesafe-ai/jev`. The relay authenticates with the
-explicitly configured AI Gateway API key whenever one exists — `AI_GATEWAY_API_KEY`
-first, then `JEV_TOKEN` for deployments configured before the standard name — and
-falls back to the deployment's request-scoped Vercel OIDC token ONLY when no
-explicit key is set. Exactly one credential is ever sent, and every relay
-response reports which lane was used as `x-jev-auth: api-key | oidc` (a name,
-never any part of the credential), so a gateway 403 can be diagnosed without
-guessing. For local runs outside Vercel, provide a valid AI Gateway key in
-`.env.local` (never committed):
+On Vercel, the live path is TypeSafe AI's own API, directly: set
+`JEV_BACKEND=typesafe` and `TYPESAFE_API_KEY=<the key>` (Production). The relay
+then posts to `https://api.typesafe.ai/v1/systemone` with model `jev-latest`,
+sends the TypeSafe key and nothing else, and reports the backend as a name on
+every response (`x-jev-backend: typesafe-direct`) — never any part of the
+credential. An unrecognised `JEV_BACKEND` value fails closed (503) rather than
+falling through to another lane, and with `JEV_BACKEND=typesafe` the gateway
+lane below is inert even if `JEV_MODEL` is still configured.
+
+The legacy gateway lane remains selectable (`JEV_MODEL=typesafe-ai/jev`). It
+authenticates with the explicitly configured AI Gateway API key whenever one
+exists — `AI_GATEWAY_API_KEY` first, then `JEV_TOKEN` for deployments configured
+before the standard name — and falls back to the deployment's request-scoped
+Vercel OIDC token ONLY when no explicit key is set. Exactly one credential is
+ever sent, and every relay response reports which lane was used as
+`x-jev-auth: api-key | oidc` (a name, never any part of the credential), so a
+gateway 403 can be diagnosed without guessing. For local runs against the direct
+API, provide the key in `.env.local` (never committed):
 
 ```
-JEV_MODEL=typesafe-ai/jev
-AI_GATEWAY_API_KEY=<your local AI Gateway key>
+JEV_BACKEND=typesafe
+TYPESAFE_API_KEY=<your local TypeSafe key>
 # optional
 JEV_MIN_CONFIDENCE=0.25
 JEV_TIMEOUT_MS=12000   # the free evaluation tier is variable; a tight
@@ -157,11 +166,15 @@ The policy refresh is scheduled from **wall-clock service capacity**, not from a
 simulated constant. `jev/scheduler.ts` spends at most **4 of the 5 requests per ~60 s
 window** the AI Gateway advertises for `typesafe-ai/jev` (measured:
 `x-ratelimit-limit-requests: 5` on every rejection, with a `retry-after` of 27–60 s) —
-one request every 15 s of wall time. At the 8× browser playback that is a fresh policy
-every ~120 simulated seconds, which is the freshest stream the measured allowance
-sustains. The previous fixed cadence asked for ~24 requests/minute against a 5-per-window
-allowance: two thirds of a full run's refreshes came back 429, and the run was
-invalidated when no fresh policy arrived before the last one's maximum hold. An explicit
+one request every 15 s of wall time. The direct TypeSafe API was probed once with the
+production request shape and returned **no rate-limit metadata at all** (a 200 carried no
+`retry-after` and no `x-ratelimit-*`), so that conservative cadence is preserved unchanged
+for the live path instead of being re-derived from an allowance nobody has measured; any
+`retry-after` a direct refusal names is honoured the same way. At the 8× browser playback
+that is a fresh policy every ~120 simulated seconds, which is the freshest stream the
+measured allowance sustains. The previous fixed cadence asked for ~24 requests/minute
+against a 5-per-window allowance: two thirds of a full run's refreshes came back 429, and
+the run was invalidated when no fresh policy arrived before the last one's maximum hold. An explicit
 `retry-after` is honoured to the millisecond (the relay forwards it to the browser as a
 bounded number), a transient 5xx backs off instead of retrying in a burst, and a
 successful answer clears that backoff. The gate is the SESSION's, not the controller's

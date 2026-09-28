@@ -28,6 +28,17 @@
  * Per-corridor and per-region questions are asked for the busiest few only,
  * capped, so the prompt stays small and the model is not asked to have opinions
  * about quiet streets.
+ *
+ * ## Two transports, one adapter (the direct TypeSafe lane)
+ *
+ * This client is the EVALUATION-shape transport, not a Vercel-specific one.
+ * TypeSafe's own API (POST https://api.typesafe.ai/v1/systemone, see
+ * jev/typesafe.ts) answers the identical shape — verified live: a bounded probe
+ * returned 200 with `answers[id] = { type, choice, confidence, probabilities }`
+ * and no rate-limit metadata — so the direct lane reuses this client wholesale
+ * with its own endpoint, model (`jev-latest`) and `name`
+ * (`"typesafe-direct"`). The name is what the client reports as its id and in
+ * its own bounded error sentences; the transport behaviour is identical.
  */
 import type { JevPolicyRequest } from "./schema";
 import {
@@ -143,6 +154,13 @@ export interface GatewayJevClientOptions {
   readonly token: string;
   readonly endpoint?: string;
   readonly model?: string;
+  /**
+   * The name this transport reports: the client `id` a run's provenance
+   * records, and the bounded word in its own error sentences
+   * (`jev <name> responded 500`). Defaults to "gateway"; the direct TypeSafe
+   * transport (jev/typesafe.ts) passes "typesafe-direct".
+   */
+  readonly id?: string;
   /** How many of the busiest corridors / regions get their own question. */
   readonly corridorQuestions?: number;
   readonly regionQuestions?: number;
@@ -472,13 +490,14 @@ export function createGatewayJevClient(options: GatewayJevClientOptions): JevCli
   if (typeof fetchImpl !== "function") {
     throw new Error("createGatewayJevClient needs a fetch implementation");
   }
+  const id = options.id ?? "gateway";
   const endpoint = options.endpoint ?? JEV_GATEWAY_ENDPOINT;
   const model = options.model ?? JEV_GATEWAY_MODEL;
   const timeoutMs = options.timeoutMs ?? JEV_GATEWAY_TIMEOUT_MS;
   let notes: JevAnswerNotes | null = null;
 
   return {
-    id: "gateway",
+    id,
     answerNotes: () => notes,
     requestPolicy: async (request) => {
       notes = null;
@@ -506,7 +525,7 @@ export function createGatewayJevClient(options: GatewayJevClientOptions): JevCli
         // gateway ever sends — an accepted answer carries none at all.
         throw new JevClientError(
           failureFromStatus(response.status, null),
-          `jev gateway responded ${response.status}`,
+          `jev ${id} responded ${response.status}`,
           retryAfterMsFromHeaders(response.headers),
         );
       }
