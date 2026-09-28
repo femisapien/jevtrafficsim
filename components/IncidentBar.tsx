@@ -14,8 +14,15 @@
  *     confirmation says that once, in one sentence (Issue #46 readability pass):
  *     the title is the accessible name, the body is what the reader sees.
  *   - instruments the world cannot support are disabled and SAY SO, using the
- *     worker's own resolution as the reason — no click that ends in "not
+ *     worker's own resolution as the reason — no click that could end in "not
  *     available" when the answer was knowable beforehand.
+ *
+ * Phone pass: the dock is a tray inside the bottom stack. Three instruments on
+ * one row, two centred on the next — every target a third or a half of the
+ * screen wide and 40px tall, all of them inside the viewport (a sideways scroll
+ * to reach the last instrument was rejected: an instrument you cannot see is an
+ * instrument you do not have). The reserved feedback line only takes space when
+ * it has something to say, so an idle tray is two rows and nothing else.
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
@@ -215,16 +222,28 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
   const line = pending === null ? (feedback ?? hint) : null;
 
   return (
+    /**
+     * Phone: the tray sits IN the bottom stack (TrafficSimulator), full width,
+     * directly under the trip card — one column of chrome, nothing absolute to
+     * collide with. Wide: the centred dock it has always been.
+     */
     <motion.div
       aria-hidden={!live}
-      className={`pointer-events-none absolute bottom-4 left-4 right-4 z-10 flex flex-col items-center gap-2 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 ${live ? "" : "invisible"}`}
+      className={`pointer-events-none z-10 flex w-full flex-col items-center gap-2 sm:absolute sm:bottom-4 sm:left-1/2 sm:w-fit sm:-translate-x-1/2 ${live ? "" : "invisible"}`}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: live ? 1 : 0, y: live ? 0 : 8 }}
       transition={{ duration: 0.32, delay: live ? 0.12 : 0, ease: [0.22, 1, 0.36, 1] }}
     >
       <div className="surface pointer-events-auto flex w-full max-w-full flex-col p-1 sm:w-auto">
+        {/*
+          What the tray is doing right now. Phone: the line only takes space when
+          it has something to say (an idle tray is two rows of instruments and
+          nothing else); wide: reserved height, so the dock never shifts.
+        */}
         <div
-          className="grid h-6 items-center px-2.5 text-meta font-medium text-ink-70"
+          className={`grid items-center px-2 text-meta font-medium text-ink-70 sm:h-6 ${
+            line === null ? "h-0 overflow-hidden" : "h-6"
+          }`}
           aria-live="polite"
         >
           <AnimatePresence mode="wait">
@@ -243,8 +262,14 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
           </AnimatePresence>
         </div>
         {pending === null ? (
-          <div className="grid grid-cols-3 items-center gap-1 sm:flex sm:gap-1.5">
-            {INCIDENTS.map((option) => {
+          /**
+           * Five instruments, one row of three then a centred pair of two on a
+           * phone — the wrap does it, and every target stays 40px tall and a
+           * third (or half) of the screen wide, fully inside the viewport (never
+           * a sideways scroll to reach the last one). Wide: the single row.
+           */
+          <div className="grid grid-cols-6 gap-1 sm:flex sm:flex-nowrap sm:gap-1.5">
+            {INCIDENTS.map((option, index) => {
               const availability = incidentAvailability(option.kind, capabilities);
               const Icon = option.icon;
               const isArmed = armed === option.kind;
@@ -256,6 +281,8 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
                   key={option.kind}
                   // A disabled control still needs to explain itself, so the
                   // reason lives on the wrapper that can receive the hover.
+                  // Two short pairs of thirds, then halves for the long labels.
+                  className={`min-w-0 shrink-0 ${index < 3 ? "col-span-2" : "col-span-3"} sm:col-span-1`}
                   title={unavailableHint ?? option.hint}
                   onMouseEnter={() => setHint(unavailableHint ?? option.hint)}
                   onMouseLeave={() => setHint((current) => (current === option.hint ? null : current))}
@@ -274,7 +301,7 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
                     onMouseLeave={() => setHint((current) => (current === option.hint ? null : current))}
                     onFocus={() => setHint(unavailableHint ?? option.hint)}
                     onBlur={() => setHint((current) => (current === option.hint ? null : current))}
-                  className={`flex h-9 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-1.5 text-meta font-medium transition-colors duration-150 sm:w-auto sm:px-3 ${
+                    className={`flex h-10 w-full items-center justify-center gap-1.5 whitespace-nowrap rounded-[7px] px-1 text-meta font-medium transition-colors duration-150 sm:h-9 sm:w-auto sm:px-3 ${
                       isArmed
                         ? "bg-ink text-surface"
                         : availability.applicable
@@ -301,14 +328,14 @@ export function IncidentBar({ onIncident }: { onIncident: (kind: IncidentKind) =
             <button
               type="button"
               onClick={acceptPending}
-              className="h-7 whitespace-nowrap rounded-[5px] bg-ink px-2.5 text-meta font-medium text-surface transition-opacity duration-150 hover:opacity-90"
+              className="h-9 whitespace-nowrap rounded-[7px] bg-ink px-3 text-meta font-medium text-surface transition-opacity duration-150 hover:opacity-90 sm:h-7 sm:rounded-[5px] sm:px-2.5"
             >
               {INCIDENT_WARNING_CONFIRM}
             </button>
             <button
               type="button"
               onClick={() => setPending(null)}
-              className="h-7 whitespace-nowrap rounded-[5px] px-2.5 text-meta font-medium text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink"
+              className="h-9 whitespace-nowrap rounded-[7px] px-3 text-meta font-medium text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink sm:h-7 sm:rounded-[5px] sm:px-2.5"
             >
               {INCIDENT_WARNING_CANCEL}
             </button>

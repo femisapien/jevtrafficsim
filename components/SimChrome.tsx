@@ -13,6 +13,13 @@
  * provenance - so it was merged into it, and the camera stack moved into the
  * control row where follow/recenter already lives. Panels are the only overlay
  * material; everything else is type on the map.
+ *
+ * Phone pass: three anchored zones and no floating status block. A compact
+ * strip top-left (40px targets, icon-only), the bottom stack (trip card over
+ * incident tray, TrafficSimulator), and the contextual control chip at the top
+ * right. The two run-level messages that used to float over the middle of the
+ * screen — waiting for Jev's first policy, and a run that could not start —
+ * now render INSIDE the trip card, so nothing overlaps the map's action.
  */
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
@@ -98,7 +105,7 @@ function IconButton({
       onClick={onClick}
       aria-label={label}
       title={label}
-      className="flex h-9 w-9 items-center justify-center rounded-[7px] text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink active:scale-[0.96]"
+      className="flex h-10 w-10 items-center justify-center rounded-[7px] text-ink-70 transition-colors duration-150 hover:bg-ink/[0.05] hover:text-ink active:scale-[0.96] sm:h-9 sm:w-9"
     >
       {children}
     </button>
@@ -171,26 +178,26 @@ function ScenarioPanel({
   return (
     <motion.div
       ref={panelRef}
-      className="surface-overlay absolute left-1/2 top-14 z-20 w-[288px] -translate-x-1/2 p-5"
+      className="surface-overlay absolute left-1/2 top-[64px] z-20 w-[280px] -translate-x-1/2 p-4 sm:top-14 sm:w-[288px] sm:p-5"
       initial={{ opacity: 0, y: -6, scale: 0.985 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -6, scale: 0.985 }}
       transition={{ duration: 0.2, ease: EASE }}
       style={{ transformOrigin: "top center" }}
     >
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-4 sm:gap-5">
         <div>
           <span className="label-micro">Trip</span>
           <select
             value={tripId}
             onChange={(event) => onTripId(event.target.value as CuratedTripId)}
-            className="mt-2.5 h-10 w-full rounded-control border border-hair-strong bg-surface px-2.5 text-meta font-medium text-ink outline-none"
+            className="mt-2.5 h-11 w-full rounded-control border border-hair-strong bg-surface px-2.5 text-meta font-medium text-ink outline-none"
           >
             {CURATED_TRIPS.map((option) => (
               <option key={option.id} value={option.id}>{option.label}</option>
             ))}
           </select>
-          <p className="mt-2 text-meta leading-relaxed text-ink-70">{trip.summary}</p>
+          <p className="mt-2 hidden text-meta leading-relaxed text-ink-70 sm:block">{trip.summary}</p>
         </div>
         <div>
           <span className="label-micro">Traffic</span>
@@ -257,15 +264,12 @@ export function SimChrome(props: SimChromeProps) {
   const scenarioOpen = useUiStore((state) => state.scenarioOpen);
   const setScenarioOpen = useUiStore((state) => state.setScenarioOpen);
   const runComplete = useUiStore((state) => state.runComplete);
-  /** A live Jev run waiting for its first policy: no simulated time is passing. */
-  const starting = useUiStore((state) => state.starting);
   /**
    * The authoritative trip completion (Issue #46), read from the frame the UI
    * already holds. The ego's arrival IS the end of the trip, and the payoff is
    * owed then — not when the citywide horizon lands.
    */
   const arrived = useUiStore((state) => state.trip?.completed === true);
-  const error = useUiStore((state) => state.error);
   const policy = useUiStore((state) => state.policy);
   const liveResult = useUiStore((state) => state.liveResult);
   const baselines = useUiStore((state) => state.baselines);
@@ -309,12 +313,13 @@ export function SimChrome(props: SimChromeProps) {
 
   return (
     <>
-      {/* Top-centre: utilities. */}
+      {/* Top-centre: utilities. Phone: a compact strip at the top-left, sized
+          for a thumb (40px targets); wide: the centred arrangement as before. */}
       <AnimatePresence>
         {live && !runComplete && (
           <motion.div
             key="utilities"
-            className="absolute left-4 right-4 top-4 z-20 sm:left-1/2 sm:right-auto sm:-translate-x-1/2"
+            className="absolute left-3 right-3 top-3 z-20 sm:left-1/2 sm:right-auto sm:top-4 sm:-translate-x-1/2"
             initial={{ opacity: 0, y: -6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
@@ -360,7 +365,7 @@ export function SimChrome(props: SimChromeProps) {
                 aria-pressed={props.following}
                 aria-label={props.following ? "Following the car" : "Recenter on the car"}
                 title={props.following ? "Following the car" : "Recenter on the car"}
-                className={`flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 ${
+                className={`flex h-10 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 sm:h-9 ${
                   props.following ? "text-ink-70 hover:bg-ink/[0.05] hover:text-ink" : "bg-ink/[0.06] text-ink"
                 }`}
               >
@@ -392,7 +397,7 @@ export function SimChrome(props: SimChromeProps) {
                 onClick={() => setScenarioOpen(!scenarioOpen)}
                 aria-expanded={scenarioOpen}
                 aria-label="Scenario"
-                className={`flex h-9 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 ${
+                className={`flex h-10 items-center gap-1.5 rounded-[7px] px-2.5 text-meta font-medium transition-colors duration-150 sm:h-9 ${
                   scenarioOpen ? "bg-ink/[0.06] text-ink" : "text-ink-70 hover:bg-ink/[0.05] hover:text-ink"
                 } focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ink/25`}
               >
@@ -442,7 +447,7 @@ export function SimChrome(props: SimChromeProps) {
         {live && finished && (
           <motion.div
             key="complete"
-            className="surface-overlay absolute left-1/2 top-1/2 z-20 max-h-[calc(100vh-48px)] w-[520px] max-w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto p-6 sm:p-7"
+            className="surface-overlay absolute left-1/2 top-1/2 z-20 max-h-[calc(100dvh-40px)] w-[520px] max-w-[calc(100vw-24px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto p-5 sm:max-h-[calc(100dvh-48px)] sm:max-w-[calc(100vw-32px)] sm:p-7"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}
@@ -521,45 +526,17 @@ export function SimChrome(props: SimChromeProps) {
             </div>
           </motion.div>
         )}
-        {live && starting && !runComplete && error === null && (
-          <motion.div
-            key="starting"
-            aria-live="polite"
-            className="surface-overlay absolute bottom-20 left-1/2 z-20 flex max-w-[440px] -translate-x-1/2 items-center gap-2 px-3.5 py-2.5"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.24, ease: EASE }}
-          >
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ink/40" aria-hidden="true" />
-            <span className="text-ui text-ink-70">
-              Waiting for Jev&apos;s first policy — the run starts when it arrives.
-            </span>
-          </motion.div>
-        )}
-        {live && error !== null && !runComplete && (
-          <motion.div
-            key="error"
-            className="surface-overlay absolute bottom-20 left-1/2 z-20 flex max-w-[440px] -translate-x-1/2 items-center gap-2 px-3.5 py-2.5"
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 8 }}
-            transition={{ duration: 0.24, ease: EASE }}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-[#b0392b]" aria-hidden="true" />
-            <span className="text-ui text-ink-70">{error}</span>
-          </motion.div>
-        )}
       </AnimatePresence>
 
-      {/* Above the dock: the one action that throws the run away asks first. */}
+      {/* Above the dock: the one action that throws the run away asks first.
+          Phone: a centred dialog. Wide: the low card over the dock. */}
       <AnimatePresence>
         {live && discard !== null && (
           <motion.div
             key="discard"
             role="alertdialog"
             aria-label={discard.title}
-            className="surface-overlay absolute bottom-16 left-1/2 z-30 flex w-[400px] max-w-[calc(100vw-32px)] -translate-x-1/2 flex-col gap-2.5 p-4"
+            className="surface-overlay absolute left-1/2 top-1/2 z-30 flex w-[400px] max-w-[calc(100vw-32px)] -translate-x-1/2 -translate-y-1/2 flex-col gap-2.5 p-4 sm:bottom-16 sm:top-auto sm:translate-y-0"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 8 }}

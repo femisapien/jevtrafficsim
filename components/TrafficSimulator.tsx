@@ -765,8 +765,16 @@ export function TrafficSimulator() {
           onZoomIn={onZoomIn}
           onZoomOut={onZoomOut}
         />
-        <TripHUD />
-        <IncidentBar onIncident={onIncident} />
+        {/*
+          Phone: ONE bottom stack — the trip card directly above the incident
+          tray, in a flex column that cannot overlap or waste the space between
+          them, both clear of the home indicator. Wide: the wrapper dissolves
+          (sm:contents) and each panel keeps the corner it always had.
+        */}
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex flex-col gap-2.5 px-3 pb-[calc(env(safe-area-inset-bottom)+12px)] sm:contents">
+          <TripHUD />
+          <IncidentBar onIncident={onIncident} />
+        </div>
       </div>
     </MotionConfig>
   );

@@ -19,6 +19,12 @@
  * needs none of that: one housing fill, three plain lamp circles, one red
  * octagon with a white band. Same geometry, same inks, less drawing.
  *
+ * Phone pass: the same objects, drawn by the same code, at chip scale. A 132px
+ * tile is a quarter of a 390px screen and took the route with it, so the phone
+ * gets a compact chip that still shows the whole head, or the whole sign, with
+ * the lit lens at full strength. Nothing about the drawing changes — only the
+ * CSS box the sprite cell is scaled into.
+ *
  * Both objects are drawn in the marker sprite's OWN coordinate systems
  * (render/control-sprites.ts: a 128x320 head cell, a 256x256 sign cell) with the
  * marker's own housing and sign inks, so the tile and the roadside marker read as
@@ -58,14 +64,15 @@ const SIGN_WHITE = "#f6efe2";
 /* Size                                                                */
 /* ------------------------------------------------------------------ */
 
-/** The tile's content box, in px: the stop sign spans it, the head centres in it. */
-const OBJECT_WIDTH = 104;
 /**
- * A three-lamp head is ~1:2.5 by construction (three lenses stacked in a
- * housing), so the signal is a tall object in a fixed-width tile.
+ * The tile's content box. Both objects are drawn in their own sprite cell and
+ * scaled by CSS: the same signal head is a 76x190 object on a laptop and a
+ * 22x55 chip on a phone, where a roadside-sized tile would be a quarter of the
+ * screen and would steal the route it is supposed to serve.
  */
-const SIGNAL_WIDTH = 76;
-const SIGNAL_HEIGHT = Math.round((SIGNAL_WIDTH * 320) / 128);
+const SIGNAL_BOX = "h-[55px] w-[22px] sm:h-[190px] sm:w-[76px]";
+/** The stop sign is square, so it needs one number, not an aspect ratio. */
+const SIGN_BOX = "h-[36px] w-[36px] sm:h-[104px] sm:w-[104px]";
 
 /* ------------------------------------------------------------------ */
 /* The signal head — the whole object                                  */
@@ -91,47 +98,48 @@ const LENS_RING_RADIUS = 37;
 /** A complete three-lamp head: one flat housing, three lamps, one of them lit. */
 function SignalHead({ lit }: { lit: ControlTileLamp }) {
   return (
-    <svg
-      aria-hidden="true"
-      className="block"
-      width={SIGNAL_WIDTH}
-      height={SIGNAL_HEIGHT}
-      viewBox="0 0 128 320"
-    >
-      <rect
-        x={HOUSING_BOX.x}
-        y={HOUSING_BOX.y}
-        width={HOUSING_BOX.width}
-        height={HOUSING_BOX.height}
-        rx={HOUSING_BOX.rx}
-        fill={HOUSING}
-      />
-      {SIGNAL_LAMPS.map(({ lamp, cy }) => {
-        const on = lamp === lit;
-        return (
-          <g key={lamp}>
-            <circle
-              cx={64}
-              cy={cy}
-              r={LAMP_RADIUS}
-              fill={CONTROL_MARKER_COLORS[lamp]}
-              fillOpacity={on ? 1 : UNLIT_ALPHA}
-            />
-            {on && (
+    <span className={`block shrink-0 ${SIGNAL_BOX}`}>
+      <svg
+        aria-hidden="true"
+        className="block h-full w-full"
+        viewBox="0 0 128 320"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <rect
+          x={HOUSING_BOX.x}
+          y={HOUSING_BOX.y}
+          width={HOUSING_BOX.width}
+          height={HOUSING_BOX.height}
+          rx={HOUSING_BOX.rx}
+          fill={HOUSING}
+        />
+        {SIGNAL_LAMPS.map(({ lamp, cy }) => {
+          const on = lamp === lit;
+          return (
+            <g key={lamp}>
               <circle
                 cx={64}
                 cy={cy}
-                r={LENS_RING_RADIUS}
-                fill="none"
-                stroke="#ffffff"
-                strokeOpacity={0.38}
-                strokeWidth={3}
+                r={LAMP_RADIUS}
+                fill={CONTROL_MARKER_COLORS[lamp]}
+                fillOpacity={on ? 1 : UNLIT_ALPHA}
               />
-            )}
-          </g>
-        );
-      })}
-    </svg>
+              {on && (
+                <circle
+                  cx={64}
+                  cy={cy}
+                  r={LENS_RING_RADIUS}
+                  fill="none"
+                  stroke="#ffffff"
+                  strokeOpacity={0.38}
+                  strokeWidth={3}
+                />
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </span>
   );
 }
 
@@ -160,35 +168,36 @@ const SIGN_BAND = octagonPoints(SIGN_RADIUS * Math.cos(Math.PI / 8) - 4);
 /** The entire sign as an object: flat red octagon, white band, STOP on its face. */
 function StopSign() {
   return (
-    <svg
-      aria-hidden="true"
-      className="block"
-      width={OBJECT_WIDTH}
-      height={OBJECT_WIDTH}
-      viewBox="0 0 256 256"
-    >
-      <polygon points={SIGN_FACE} fill={CONTROL_MARKER_COLORS.stop} />
-      <polygon
-        points={SIGN_BAND}
-        fill="none"
-        stroke={SIGN_WHITE}
-        strokeWidth={7}
-        strokeLinejoin="miter"
-      />
-      <text
-        x={SIGN_CENTER}
-        y={SIGN_CENTER}
-        dy="0.35em"
-        textAnchor="middle"
-        fontSize={62}
-        fontWeight={700}
-        letterSpacing={1}
-        fill={SIGN_WHITE}
-        className="font-sans"
+    <span className={`block shrink-0 ${SIGN_BOX}`}>
+      <svg
+        aria-hidden="true"
+        className="block h-full w-full"
+        viewBox="0 0 256 256"
+        preserveAspectRatio="xMidYMid meet"
       >
-        STOP
-      </text>
-    </svg>
+        <polygon points={SIGN_FACE} fill={CONTROL_MARKER_COLORS.stop} />
+        <polygon
+          points={SIGN_BAND}
+          fill="none"
+          stroke={SIGN_WHITE}
+          strokeWidth={7}
+          strokeLinejoin="miter"
+        />
+        <text
+          x={SIGN_CENTER}
+          y={SIGN_CENTER}
+          dy="0.35em"
+          textAnchor="middle"
+          fontSize={62}
+          fontWeight={700}
+          letterSpacing={1}
+          fill={SIGN_WHITE}
+          className="font-sans"
+        >
+          STOP
+        </text>
+      </svg>
+    </span>
   );
 }
 
@@ -230,9 +239,9 @@ export function ControlTile({ state }: { state: ControlTileState | null }) {
           data-control-lamp={state.lamp ?? "none"}
           // Top-right, clear of the two things that already live there: the OSM
           // attribution (top-2, ~10px tall) on wide screens, and the utilities
-          // row (top-4, full width) on a phone. 132px wide + right-2 stays
-          // inside the narrowest supported viewport (390px) with room to spare.
-          className="pointer-events-none absolute right-2 top-16 z-10 sm:top-8"
+          // strip (top-3, ~48px tall) on a phone. The phone's chip is ~38px wide
+          // and stays inside the narrowest supported viewport (360px).
+          className="pointer-events-none absolute right-2 top-[68px] z-10 sm:top-8"
           initial={{ opacity: 0, y: -4 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -4 }}
@@ -241,7 +250,7 @@ export function ControlTile({ state }: { state: ControlTileState | null }) {
           <div
             role="status"
             aria-label="Control ahead"
-            className="surface flex w-[132px] flex-col items-center px-3.5 py-3.5"
+            className="surface flex w-auto items-center justify-center p-2 sm:w-[132px] sm:flex-col sm:px-3.5 sm:py-3.5"
           >
             <Body state={state} />
           </div>

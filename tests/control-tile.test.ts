@@ -367,13 +367,27 @@ describe("control tile surface", () => {
     expect(tile).not.toContain("h-2.5 w-2.5");
   });
 
-  it("draws the objects large, and takes every state ink from the marker palette", () => {
+  it("draws the objects large on the wide layout, and compact on a phone", () => {
     // "Large" is the point of this surface (the owner's ask): the object must not
-    // shrink back to a glyph. Both sizes are the tile's own constants.
-    const objectWidth = Number(tile.match(/const OBJECT_WIDTH = (\d+)/)?.[1]);
-    const signalWidth = Number(tile.match(/const SIGNAL_WIDTH = (\d+)/)?.[1]);
-    expect(objectWidth).toBeGreaterThanOrEqual(96);
-    expect(signalWidth).toBeGreaterThanOrEqual(64);
+    // shrink back to a glyph on the layout it was designed for. The wide layout
+    // keeps the roadside sizes. The phone gets a deliberately compact chip of the
+    // SAME whole object (owner's phone pass: the tile must not take over a 390px
+    // screen) — smaller, never a dot, and the state still read from the object.
+    const signalBox = tile.match(/const SIGNAL_BOX = "([^"]+)"/)?.[1] ?? "";
+    const signBox = tile.match(/const SIGN_BOX = "([^"]+)"/)?.[1] ?? "";
+    const width = (source: string, prefix: string) =>
+      Number(source.match(new RegExp(`${prefix}\\[(\\d+)px\\]`))?.[1]);
+    const wideSignal = width(signalBox, "sm:w-");
+    const wideSign = width(signBox, "sm:w-");
+    expect(wideSignal).toBeGreaterThanOrEqual(64);
+    expect(wideSign).toBeGreaterThanOrEqual(96);
+    const phoneSignal = width(signalBox, "w-");
+    const phoneSign = width(signBox, "w-");
+    // A three-lamp head and a sign you can still read as themselves.
+    expect(phoneSignal).toBeGreaterThanOrEqual(16);
+    expect(phoneSign).toBeGreaterThanOrEqual(28);
+    expect(phoneSignal).toBeLessThan(wideSignal);
+    expect(phoneSign).toBeLessThan(wideSign);
     // The authoritative inks come from CONTROL_MARKER_COLORS or not at all: a
     // literal lamp colour here could silently drift from the map marker.
     expect(tile).not.toMatch(/#ff4a3d|#ffc93c|#4ee06a|#b3312a/i);
