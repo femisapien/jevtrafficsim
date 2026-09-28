@@ -138,7 +138,16 @@ test("mobile trip HUD and incident controls stay inside the viewport", async ({ 
   const hud = page.getByRole("status", { name: "Trip" });
   const lastControl = page.getByRole("button", { name: "Event Lets Out" });
   const following = page.getByRole("button", { name: "Following the car" });
-  const scenario = page.getByRole("button", { name: "Scenario" });
+  // The chrome's OWN Scenario control, bound to the label the component
+  // declares. `getByRole("button", { name: "Scenario" })` is a case-insensitive
+  // SUBSTRING match, and the onboarding config panel's "New scenario" button is
+  // still in the accessibility tree while that panel plays its exit, so the
+  // role+name locator resolves to TWO elements for that window (measured on the
+  // release-audit probe: two buttons matching /scenario/i coexist for ~2-3 s
+  // after the live chrome mounts, and the scoped locator below never matches
+  // more than one). See Onboarding.tsx "New scenario" vs SimChrome.tsx
+  // aria-label="Scenario".
+  const scenario = page.locator('button[aria-label="Scenario"]');
   await expect(hud).toBeVisible();
   await expect(lastControl).toBeVisible();
   await expect(following).toBeVisible();
