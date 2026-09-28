@@ -6,21 +6,68 @@
  * pass while the late run degraded, and no comparison between early and late at
  * all. It could not have caught the bug it was supposed to catch.
  *
- * What replaces it:
+ *   Test 1 runs a real 6 000-tick rush hour and checks that it really
+ *   accumulated history, stayed invariant-clean, and stayed inside the
+ *   machine-scaled cost guards.
  *
- *   1. a real 6 000-tick rush-hour run of the frozen Metro geography, asserting
- *      that a step costs the same with thousands of arrivals behind it as it did
- *      while the live population was still filling — and that the arrivals are
- *      really there (an empty run would pass any ratio);
- *   2. a direct, decisive regression for the invariant itself: pad canonical
- *      HISTORY with thousands of arrived vehicles and prove one step does not
- *      get slower. This is the check the old file lacked, it runs in seconds, and
- *      it fails loudly on the pre-#40 engine.
+ *   Test 2 is the instrument for the invariant itself: pad canonical HISTORY
+ *   behind the same live traffic and prove a step does not get slower.
  *
- * Both are ratios, not hardware-sensitive absolute thresholds. The one absolute
- * number that remains is a playback sanity bound with roughly an order of
- * magnitude of headroom, so it catches a catastrophic regression without
- * measuring the CI machine.
+ * ## Why the old growth ratio was retired (measured)
+ *
+ * The old assertion compared the median step cost of ticks 2 000–3 000 with that
+ * of ticks 5 000–6 000 — two windows ~40 s of wall-clock apart — and required
+ * `late / mid < 1.5 × (live / midLive)`. Both halves are measured under whatever
+ * load the runner happened to be under, and the measurements say the bound was
+ * therefore reporting the runner:
+ *
+ *   - the same code, three CI runs of the same commit range: growth 1.98×, 2.11×
+ *     and 2.50× against the 2.42× bound. The failing run's mid window was the
+ *     FASTEST of the three (1.36 µs/step/live-vehicle vs 1.53 and 1.67) and its
+ *     late window was mid-pack (2.11 vs 1.87 and 2.18): the ratio moved, the code
+ *     did not, and its per-live cost was no worse than the green run's;
+ *   - this machine, same code, byte-identical simulation (`live=11106 (mid 6880)
+ *     arrived=4681` in every run) with CPU load as the only variable: growth
+ *     1.49× quiet, 2.09× at load 11, 8.08× at load 51;
+ *   - the noise is not small relative to the claim: the history term is ~13% of a
+ *     late step, so restoring the pre-#40 history sweeps moves that growth ratio
+ *     by about 1% — far inside the runner's own ±25% swing on the same runner.
+ *
+ * Same-tick variants were measured before landing here, and rejected on their
+ * numbers: comparing the late run against a mid-run twin in one epoch (per-live
+ * creep) is structurally blind — both arms carry the same history-per-live-vehicle
+ * burden to within ~10%, so a restored-history regression moved it by <2%, and its
+ * baseline drifted 0.75 → 0.99 with load; and normalising the padded/real step
+ * cost at the late fleet (11 106 live) produced a baseline of 1.29–1.83 with a
+ * ±15–30% run-to-run spread — bigger than the regression's own signal, because
+ * 11 106 live vehicles dominate a step and the padding needed to see the history
+ * term at all perturbs the heap.
+ *
+ * ## What test 2 asserts
+ *
+ * Two engines of the same scenario, stepped tick for tick, so live traffic and
+ * the RNG sequence are identical; one gets extra arrived vehicles in canonical
+ * history. Same tick, same fleet, same epoch — a runner whose speed moves moves
+ * both arms together, which is why its ratio has been stable to 1.01–1.08× on
+ * CI runners whose absolute per-step cost swung 1.7× between runs (6.57 ms vs
+ * 3.90 ms, same code).
+ *
+ * The padding is a microscope: it amplifies a per-arrival cost that is invisible
+ * next to live traffic. Two paddings are asserted, the original 8 000 (bound
+ * 1.25, unchanged since it was calibrated against the pre-#40 engine's 1.441)
+ * and a harder 100 000, because the engine has grown heavier per live vehicle
+ * since that calibration and the smaller padding can no longer see a partial
+ * reintroduction of the #40 sweeps.
+ *
+ * ## What is deliberately NOT asserted
+ *
+ * The old ratio's other half — "cost may not grow faster than the fleet" — has no
+ * assertion, with numbers: the arms of any same-epoch pair in this scenario
+ * differ by 1.6× in live traffic but carry the same live cost per vehicle to
+ * within ~10%, so such a bound trips only on a regression worth roughly +250% of
+ * a late step, while the runner crosses it by load alone. The machine-scaled
+ * guards below (per-live-vehicle budget, and the two catastrophe tripwires) cover
+ * that class instead.
  */
 import { describe, expect, it } from "vitest";
 import { createAdaptiveController } from "@/controllers/adaptive";
@@ -69,9 +116,25 @@ function rushEngine(seed = 7, withEgo = false): EngineState {
   return createEngine({ city: model.city, controller: createAdaptiveController(), spawns });
 }
 
+/** Appends `count` arrived vehicles to canonical history only. */
+function padHistory(engine: EngineState, count: number): void {
+  for (let index = 0; index < count; index += 1) {
+    spawnVehicle(engine.city, engine.traffic, {
+      // Sequential id, as the allocator requires; a route-less spawn is born
+      // arrived, so it lands in canonical history only.
+      id: engine.traffic.vehicles.length,
+      type: "car",
+      origin: 0,
+      destination: 0,
+      route: [],
+      spawnTimeMs: engine.traffic.timeMs,
+    });
+  }
+}
+
 describe("Chicago Metro performance", () => {
   it(
-    "keeps late-run step cost bounded by live traffic, not by arrivals (6 000-tick rush hour)",
+    "keeps late-run step cost inside the machine-scaled guards (6 000-tick rush hour)",
     { timeout: 300_000 },
     () => {
       const engine = rushEngine();
@@ -94,6 +157,10 @@ describe("Chicago Metro performance", () => {
       const arrived = engine.traffic.vehicles.length - live;
       const midMedian = median(windows.mid);
       const lateMedian = median(windows.late);
+      // Reported for comparability with earlier runs. NOT asserted: the two
+      // windows are sampled ~40 s apart, so on a shared runner the quotient
+      // reports the runner's load rather than the code (file header). The
+      // invariant itself is asserted in the lockstep test below.
       const growth = lateMedian / Math.max(1e-6, midMedian);
       const liveMicrosPerStep = ((lateMedian * 1_000) / Math.max(1, live));
 
@@ -107,20 +174,18 @@ describe("Chicago Metro performance", () => {
       // The run really accumulated history: without this the ratios are vacuous.
       expect(arrived).toBeGreaterThan(1_500);
       expect(engine.traffic.vehicles.length).toBeGreaterThan(3_500);
-      // Both windows sit past the start-up ramp, so growth beyond that point can
-      // only come from history (this is the discriminator the old guard was
-      // missing). The production demand profile keeps feeding a rush-hour city
-      // for the whole run, so the fleet between the two windows is measured
-      // rather than assumed flat: a rising fleet may raise cost, but cost must
-      // never grow faster than the fleet that causes it.
-      const liveRatio = Math.max(1, live / Math.max(1, midLive));
-      expect(growth).toBeLessThan(1.5 * liveRatio);
-      // Per-live-vehicle work must not creep upwards either.
+      // Per-live-vehicle work must not creep upwards. This is a budget, not a
+      // ratio: it scales with the machine, and it is documented as such. The same
+      // code has measured 0.7–0.9 µs locally and 1.9–2.2 µs across CI runs.
       expect(liveMicrosPerStep).toBeLessThan(6);
-      // Playback sanity only: 7 simulation steps run per 100 ms tick, so a single
-      // step must sit far inside that budget. Generous on purpose.
-      expect(lateMedian).toBeLessThan(25);
-      expect(percentile(windows.late, 0.95)).toBeLessThan(60);
+      // Catastrophe tripwires only: these DO measure the machine. The same code's
+      // late median was 20.8 / 23.4 / 24.2 ms and its p95 27.3 / 27.8 / 29.4 ms
+      // across three CI runs of the same commit range, and 2× CPU oversubscription
+      // on a 12-core workstation produced 22.1 ms late / 64.0 ms p95. They sit ~3×
+      // above the slowest observed runner so a busy runner cannot fail the build,
+      // while a step orders of magnitude slower than that still does.
+      expect(lateMedian).toBeLessThan(75);
+      expect(percentile(windows.late, 0.95)).toBeLessThan(150);
     },
   );
 
@@ -130,65 +195,81 @@ describe("Chicago Metro performance", () => {
     () => {
       // Lockstep control: two engines of the SAME scenario, stepped tick for
       // tick, so the live population and the RNG sequence are identical. One
-      // gets 8 000 extra arrived vehicles in canonical history; the other does
-      // not. Any difference in step cost is therefore caused by history alone —
-      // which is exactly the invariant, and it needs no absolute threshold.
-      const padded = rushEngine(11);
+      // gets extra arrived vehicles in canonical history; the other does not.
+      // Any difference in step cost is therefore caused by history alone — which
+      // is exactly the invariant, and it needs no absolute threshold.
       const control = rushEngine(11);
+      const padded = rushEngine(11);
+      const paddedHard = rushEngine(11);
       for (let tick = 0; tick < 400; tick += 1) {
-        stepEngine(padded);
         stepEngine(control);
+        stepEngine(padded);
+        stepEngine(paddedHard);
       }
 
       const PADDING = 8_000;
-      for (let index = 0; index < PADDING; index += 1) {
-        spawnVehicle(padded.city, padded.traffic, {
-          // Sequential id, as the allocator requires; a route-less spawn is born
-          // arrived, so it lands in canonical history only.
-          id: padded.traffic.vehicles.length,
-          type: "car",
-          origin: 0,
-          destination: 0,
-          route: [],
-          spawnTimeMs: padded.traffic.timeMs,
-        });
-      }
+      const PADDING_HARD = 100_000;
+      padHistory(padded, PADDING);
+      padHistory(paddedHard, PADDING_HARD);
 
-      const paddedSamples: number[] = [];
       const controlSamples: number[] = [];
+      const paddedSamples: number[] = [];
+      const paddedHardSamples: number[] = [];
       for (let tick = 0; tick < 300; tick += 1) {
-        const paddedStart = performance.now();
-        stepEngine(padded);
-        paddedSamples.push(performance.now() - paddedStart);
         const controlStart = performance.now();
         stepEngine(control);
         controlSamples.push(performance.now() - controlStart);
+        const paddedStart = performance.now();
+        stepEngine(padded);
+        paddedSamples.push(performance.now() - paddedStart);
+        const hardStart = performance.now();
+        stepEngine(paddedHard);
+        paddedHardSamples.push(performance.now() - hardStart);
       }
 
-      const paddedMedian = median(paddedSamples);
       const controlMedian = median(controlSamples);
+      const paddedMedian = median(paddedSamples);
+      const paddedHardMedian = median(paddedHardSamples);
       const growth = paddedMedian / Math.max(1e-6, controlMedian);
+      const growthHard = paddedHardMedian / Math.max(1e-6, controlMedian);
       console.log(
         `[history invariance] history ${control.traffic.vehicles.length} vs ${padded.traffic.vehicles.length} ` +
-          `(live ${padded.traffic.activeVehicles.size} both) ` +
-          `median ${controlMedian.toFixed(3)}ms vs ${paddedMedian.toFixed(3)}ms growth=${growth.toFixed(2)}×`,
+          `vs ${paddedHard.traffic.vehicles.length} (live ${padded.traffic.activeVehicles.size} both) ` +
+          `median ${controlMedian.toFixed(3)}ms vs ${paddedMedian.toFixed(3)}ms vs ${paddedHardMedian.toFixed(3)}ms ` +
+          `growth=${growth.toFixed(2)}× growthHard=${growthHard.toFixed(2)}×`,
       );
 
       expect(checkTrafficInvariants(padded.city, padded.traffic)).toEqual([]);
+      expect(checkTrafficInvariants(paddedHard.city, paddedHard.traffic)).toEqual([]);
       expect(checkTrafficInvariants(control.city, control.traffic)).toEqual([]);
       // The padding is real and enormous: more vehicles than a whole run spawns.
       expect(padded.traffic.vehicles.length - control.traffic.vehicles.length).toBe(PADDING);
-      // Both runs are the same scenario at the same simulated time: same live
-      // population, so the comparison is apples to apples.
+      expect(paddedHard.traffic.vehicles.length - control.traffic.vehicles.length).toBe(PADDING_HARD);
+      // All three runs are the same scenario at the same simulated time: same
+      // live population, so the comparisons are apples to apples.
       expect(padded.traffic.timeMs).toBe(control.traffic.timeMs);
+      expect(paddedHard.traffic.timeMs).toBe(control.traffic.timeMs);
       expect(padded.traffic.activeVehicles.size).toBe(control.traffic.activeVehicles.size);
-      // THE invariant: 8 000 extra arrived vehicles must not make a step slower.
+      expect(paddedHard.traffic.activeVehicles.size).toBe(control.traffic.activeVehicles.size);
+      // THE invariant: extra arrived vehicles must not make a step slower.
       // Measured on this machine: pre-#40 engine 1.441× (0.761 → 1.096 ms), with
       // the live index 1.133× (0.758 → 0.859 ms). The residual ~0.10 ms is heap
       // and GC pressure from keeping canonical history, which the issue requires
       // keeping. The bound sits between the two — 1.25 — so it fails the old
       // engine and passes the new one without measuring the CI machine.
       expect(growth).toBeLessThan(1.25);
+      // The same claim with a microscope 12× stronger, because the engine is
+      // heavier per live vehicle than it was when the 1.25 above was calibrated:
+      // at 8 000 the padding is only ~3% of a step, so a partial reintroduction of
+      // the #40 sweeps lands inside this test's noise band (measured: 1.14×).
+      // Measured on this machine, 300-tick medians, n=2 runs:
+      //   post-#40 code          1.66× / 1.67×
+      //   full pre-#40 shape     2.87×  (per-tick metrics, approach stats,
+      //   observations and arrival accounting all sweeping canonical history)
+      // 2.1 is the geometric middle of those two excesses (+66% / +187%), so the
+      // bound tolerates a ±68% machine variation in per-history-scan cost on
+      // either side while still failing the regression by 36% of its own excess.
+      expect(growthHard).toBeLessThan(2.1);
     },
   );
 
