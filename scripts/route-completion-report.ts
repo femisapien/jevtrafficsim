@@ -214,13 +214,27 @@ function measure(
 }
 
 function runCell(tripId: CuratedTripId, choice: ControllerChoice): Cell {
-  const run = buildScenarioRun(model, {
-    tripId,
-    trafficLevel,
-    driver,
-    seed,
-    durationMs: horizonMs,
-  });
+  const run = buildScenarioRun(
+    model,
+    {
+      tripId,
+      trafficLevel,
+      driver,
+      seed,
+      durationMs: horizonMs,
+    },
+    {
+      // The seam's jev factory needs an adapter; the report always benches the
+      // deterministic mock (same client the traced path below uses).
+      controllers: {
+        jev: (context) =>
+          createJevController({
+            client: createMockJevClient(),
+            scenarioFingerprint: context.fingerprint,
+          }),
+      },
+    },
+  );
   const engine = createEngine({
     city: model.city,
     controller: buildController(choice, run.fingerprint),
